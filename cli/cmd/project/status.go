@@ -2,7 +2,6 @@ package project
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/rilldata/rill/cli/pkg/cmdutil"
@@ -21,26 +20,24 @@ func StatusCmd(ch *cmdutil.Helper) *cobra.Command {
 		Args:  cobra.MaximumNArgs(1),
 		Short: "Project deployment status",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg := ch.Config
-			client, err := cmdutil.Client(cfg)
+			client, err := ch.Client()
 			if err != nil {
 				return err
 			}
-			defer client.Close()
 
 			if len(args) > 0 {
 				name = args[0]
 			}
 
-			if !cmd.Flags().Changed("project") && len(args) == 0 && cfg.Interactive {
-				name, err = inferProjectName(cmd.Context(), client, cfg.Org, path)
+			if !cmd.Flags().Changed("project") && len(args) == 0 && ch.Interactive {
+				name, err = ch.InferProjectName(cmd.Context(), ch.Org, path)
 				if err != nil {
-					return err
+					return fmt.Errorf("unable to infer project name (use `--project` to explicitly specify the name): %w", err)
 				}
 			}
 
 			proj, err := client.GetProject(cmd.Context(), &adminv1.GetProjectRequest{
-				OrganizationName: cfg.Org,
+				OrganizationName: ch.Org,
 				Name:             name,
 			})
 			if err != nil {
@@ -48,7 +45,7 @@ func StatusCmd(ch *cmdutil.Helper) *cobra.Command {
 			}
 
 			// 1. Print project info
-			ch.Printer.PrintlnSuccess("Project info\n")
+			ch.PrintfSuccess("Project info\n\n")
 			fmt.Printf("  Name: %s\n", proj.Project.Name)
 			fmt.Printf("  Organization: %v\n", proj.Project.OrgName)
 			fmt.Printf("  Public: %v\n", proj.Project.Public)
@@ -62,7 +59,7 @@ func StatusCmd(ch *cmdutil.Helper) *cobra.Command {
 			}
 
 			// 2. Print deployment info
-			ch.Printer.PrintlnSuccess("\nDeployment info\n")
+			ch.PrintfSuccess("\nDeployment info\n\n")
 			fmt.Printf("  Web: %s\n", proj.Project.FrontendUrl)
 			fmt.Printf("  Runtime: %s\n", depl.RuntimeHost)
 			fmt.Printf("  Instance: %s\n", depl.RuntimeInstanceId)
@@ -70,7 +67,7 @@ func StatusCmd(ch *cmdutil.Helper) *cobra.Command {
 			if proj.Project.ProdOlapDsn != "" {
 				fmt.Printf("  OLAP DSN: %s\n", proj.Project.ProdOlapDsn)
 			}
-			fmt.Printf("  Slots: %d\n", depl.Slots)
+			fmt.Printf("  Slots: %d\n", proj.Project.ProdSlots)
 			fmt.Printf("  Branch: %s\n", depl.Branch)
 			if proj.Project.Subpath != "" {
 				fmt.Printf("  Subpath: %s\n", proj.Project.Subpath)
@@ -96,12 +93,12 @@ func StatusCmd(ch *cmdutil.Helper) *cobra.Command {
 				return fmt.Errorf("failed to list resources: %w", err)
 			}
 
-			var parser *runtimev1.ProjectParser
+			var parser *runtimev1.Resource
 			var table []*resourceTableRow
 
 			for _, r := range res.Resources {
 				if r.Meta.Name.Kind == runtime.ResourceKindProjectParser {
-					parser = r.GetProjectParser()
+					parser = r
 				}
 				if r.Meta.Hidden {
 					continue
@@ -110,22 +107,31 @@ func StatusCmd(ch *cmdutil.Helper) *cobra.Command {
 				table = append(table, newResourceTableRow(r))
 			}
 
-			ch.Printer.PrintlnSuccess("\nResources\n")
-			err = ch.Printer.PrintResource(table)
-			if err != nil {
-				return err
-			}
+			ch.PrintfSuccess("\nResources\n\n")
+			ch.PrintData(table)
 
-			if parser.State != nil && len(parser.State.ParseErrors) != 0 {
+			if parser != nil {
+				state := parser.GetProjectParser().State
+
 				var table []*parseErrorTableRow
-				for _, e := range parser.State.ParseErrors {
-					table = append(table, newParseErrorTableRow(e))
+				if parser.Meta.ReconcileError != "" {
+					table = append(table, &parseErrorTableRow{
+						Path:  "<meta>",
+						Error: parser.Meta.ReconcileError,
+					})
+				}
+				if state != nil {
+					for _, e := range state.ParseErrors {
+						table = append(table, &parseErrorTableRow{
+							Path:  e.FilePath,
+							Error: e.Message,
+						})
+					}
 				}
 
-				ch.Printer.PrintlnSuccess("\nParse errors\n")
-				err = ch.Printer.PrintResource(table)
-				if err != nil {
-					return err
+				if len(table) > 0 {
+					ch.PrintfSuccess("\nParse errors\n\n")
+					ch.PrintData(table)
 				}
 			}
 
@@ -140,7 +146,7 @@ func StatusCmd(ch *cmdutil.Helper) *cobra.Command {
 }
 
 type resourceTableRow struct {
-	Kind   string `header:"kind"`
+	Type   string `header:"type"`
 	Name   string `header:"name"`
 	Status string `header:"status"`
 	Error  string `header:"error"`
@@ -153,42 +159,14 @@ func newResourceTableRow(r *runtimev1.Resource) *resourceTableRow {
 	}
 
 	return &resourceTableRow{
-		Kind:   formatResourceKind(r.Meta.Name.Kind),
+		Type:   runtime.PrettifyResourceKind(r.Meta.Name.Kind),
 		Name:   r.Meta.Name.Name,
-		Status: formatReconcileStatus(r.Meta.ReconcileStatus),
+		Status: runtime.PrettifyReconcileStatus(r.Meta.ReconcileStatus),
 		Error:  truncErr,
-	}
-}
-
-func formatResourceKind(k string) string {
-	k = strings.TrimPrefix(k, "rill.runtime.v1.")
-	k = strings.TrimSuffix(k, "V2")
-	return k
-}
-
-func formatReconcileStatus(s runtimev1.ReconcileStatus) string {
-	switch s {
-	case runtimev1.ReconcileStatus_RECONCILE_STATUS_UNSPECIFIED:
-		return "Unknown"
-	case runtimev1.ReconcileStatus_RECONCILE_STATUS_IDLE:
-		return "Idle"
-	case runtimev1.ReconcileStatus_RECONCILE_STATUS_PENDING:
-		return "Pending"
-	case runtimev1.ReconcileStatus_RECONCILE_STATUS_RUNNING:
-		return "Running"
-	default:
-		panic(fmt.Errorf("unknown reconcile status: %s", s.String()))
 	}
 }
 
 type parseErrorTableRow struct {
 	Path  string `header:"path"`
 	Error string `header:"error"`
-}
-
-func newParseErrorTableRow(e *runtimev1.ParseError) *parseErrorTableRow {
-	return &parseErrorTableRow{
-		Path:  e.FilePath,
-		Error: e.Message,
-	}
 }

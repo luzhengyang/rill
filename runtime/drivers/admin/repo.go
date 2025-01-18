@@ -2,6 +2,8 @@ package admin
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"io/fs"
@@ -9,21 +11,32 @@ import (
 	"path"
 	"path/filepath"
 
-	doublestar "github.com/bmatcuk/doublestar/v4"
+	"github.com/bmatcuk/doublestar/v4"
 	"github.com/go-git/go-git/v5"
 	"github.com/rilldata/rill/runtime/drivers"
 )
 
-var listFileslimit = 2000
+func (h *Handle) Root(ctx context.Context) (string, error) {
+	err := h.rlockEnsureCloned(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer h.repoMu.RUnlock()
 
-func (h *Handle) Root() string {
-	return h.projPath
+	return h.projPath, nil
 }
 
 func (h *Handle) CommitHash(ctx context.Context) (string, error) {
-	err := h.cloneOrPull(ctx, true)
+	err := h.rlockEnsureCloned(ctx)
 	if err != nil {
 		return "", err
+	}
+	defer h.repoMu.RUnlock()
+
+	if h.downloadURL != "" {
+		// use downloadURL as a proxy for CommitHash for one-time uploads
+		// It will change when new data is uploaded
+		return h.downloadURL, nil
 	}
 
 	repo, err := git.PlainOpen(h.repoPath)
@@ -43,30 +56,37 @@ func (h *Handle) CommitHash(ctx context.Context) (string, error) {
 	return ref.Hash().String(), nil
 }
 
-func (h *Handle) ListRecursive(ctx context.Context, glob string) ([]string, error) {
-	err := h.cloneOrPull(ctx, true)
+func (h *Handle) ListRecursive(ctx context.Context, glob string, skipDirs bool) ([]drivers.DirEntry, error) {
+	err := h.rlockEnsureCloned(ctx)
 	if err != nil {
 		return nil, err
 	}
+	defer h.repoMu.RUnlock()
 
 	fsRoot := os.DirFS(h.projPath)
-	glob = path.Clean(path.Join("./", glob))
+	glob = path.Clean(path.Join(".", glob))
 
-	var paths []string
+	var entries []drivers.DirEntry
 	err = doublestar.GlobWalk(fsRoot, glob, func(p string, d fs.DirEntry) error {
-		// Don't track directories
-		if d.IsDir() {
+		if skipDirs && d.IsDir() {
 			return nil
 		}
 
 		// Exit if we reached the limit
-		if len(paths) == listFileslimit {
-			return fmt.Errorf("glob exceeded limit of %d matched files", listFileslimit)
+		if len(entries) == drivers.RepoListLimit {
+			return drivers.ErrRepoListLimitExceeded
 		}
 
 		// Track file (p is already relative to the FS root)
-		p = filepath.Join("/", p)
-		paths = append(paths, p)
+		p = path.Join("/", p)
+		// Do not send files for ignored paths
+		if drivers.IsIgnored(p, h.ignorePaths) {
+			return nil
+		}
+		entries = append(entries, drivers.DirEntry{
+			Path:  p,
+			IsDir: d.IsDir(),
+		})
 
 		return nil
 	})
@@ -74,19 +94,24 @@ func (h *Handle) ListRecursive(ctx context.Context, glob string) ([]string, erro
 		return nil, err
 	}
 
-	return paths, nil
+	return entries, nil
 }
 
 func (h *Handle) Get(ctx context.Context, filePath string) (string, error) {
-	err := h.cloneOrPull(ctx, true)
+	err := h.rlockEnsureCloned(ctx)
 	if err != nil {
 		return "", err
 	}
+	defer h.repoMu.RUnlock()
 
-	filePath = filepath.Join(h.projPath, filePath)
+	fp := filepath.Join(h.projPath, filePath)
 
-	b, err := os.ReadFile(filePath)
+	b, err := os.ReadFile(fp)
 	if err != nil {
+		// obscure the root directory location
+		if t, ok := err.(*fs.PathError); ok { // nolint:errorlint // we specifically check for a non-wrapped error
+			return "", fmt.Errorf("%s %s %s", t.Op, filePath, t.Err.Error())
+		}
 		return "", err
 	}
 
@@ -94,10 +119,11 @@ func (h *Handle) Get(ctx context.Context, filePath string) (string, error) {
 }
 
 func (h *Handle) Stat(ctx context.Context, filePath string) (*drivers.RepoObjectStat, error) {
-	err := h.cloneOrPull(ctx, true)
+	err := h.rlockEnsureCloned(ctx)
 	if err != nil {
 		return nil, err
 	}
+	defer h.repoMu.RUnlock()
 
 	filePath = filepath.Join(h.projPath, filePath)
 
@@ -108,23 +134,55 @@ func (h *Handle) Stat(ctx context.Context, filePath string) (*drivers.RepoObject
 
 	return &drivers.RepoObjectStat{
 		LastUpdated: info.ModTime(),
+		IsDir:       info.IsDir(),
 	}, nil
+}
+
+func (h *Handle) FileHash(ctx context.Context, paths []string) (string, error) {
+	err := h.rlockEnsureCloned(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer h.repoMu.RUnlock()
+
+	hasher := md5.New()
+	for _, path := range paths {
+		path = filepath.Join(h.projPath, path)
+		file, err := os.Open(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return "", err
+		}
+
+		if _, err := io.Copy(hasher, file); err != nil {
+			file.Close()
+			return "", err
+		}
+		file.Close()
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 func (h *Handle) Put(ctx context.Context, filePath string, reader io.Reader) error {
 	return fmt.Errorf("put operation is unsupported")
 }
 
+func (h *Handle) MakeDir(ctx context.Context, dirPath string) error {
+	return fmt.Errorf("make dir operation is unsupported")
+}
+
 func (h *Handle) Rename(ctx context.Context, fromPath, toPath string) error {
 	return fmt.Errorf("rename operation is unsupported")
 }
 
-func (h *Handle) Delete(ctx context.Context, filePath string) error {
+func (h *Handle) Delete(ctx context.Context, filePath string, force bool) error {
 	return fmt.Errorf("delete operation is unsupported")
 }
 
 func (h *Handle) Sync(ctx context.Context) error {
-	return h.cloneOrPull(ctx, false)
+	return h.cloneOrPull(ctx)
 }
 
 func (h *Handle) Watch(ctx context.Context, callback drivers.WatchCallback) error {

@@ -13,7 +13,6 @@ import (
 func RenameCmd(ch *cmdutil.Helper) *cobra.Command {
 	var name, newName string
 	var force bool
-	cfg := ch.Config
 
 	renameCmd := &cobra.Command{
 		Use:   "rename",
@@ -22,24 +21,26 @@ func RenameCmd(ch *cmdutil.Helper) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 
-			client, err := cmdutil.Client(cfg)
+			client, err := ch.Client()
 			if err != nil {
 				return err
 			}
-			defer client.Close()
 
 			fmt.Println("Warn: Renaming an org would invalidate dashboard URLs")
 
-			if !cmd.Flags().Changed("org") && cfg.Interactive {
-				orgNames, err := cmdutil.OrgNames(ctx, client)
+			if !cmd.Flags().Changed("org") && ch.Interactive {
+				orgNames, err := OrgNames(ctx, ch)
 				if err != nil {
 					return err
 				}
 
-				name = cmdutil.SelectPrompt("Select org to rename", orgNames, "")
+				name, err = cmdutil.SelectPrompt("Select org to rename", orgNames, "")
+				if err != nil {
+					return err
+				}
 			}
 
-			if cfg.Interactive {
+			if ch.Interactive {
 				err = cmdutil.SetFlagsByInputPrompts(*cmd, "new-name")
 				if err != nil {
 					return err
@@ -51,8 +52,12 @@ func RenameCmd(ch *cmdutil.Helper) *cobra.Command {
 			}
 
 			if !force {
-				msg := fmt.Sprintf("Do you want to rename org \"%s\" to \"%s\"?", color.YellowString(name), color.YellowString(newName))
-				if !cmdutil.ConfirmPrompt(msg, "", false) {
+				msg := fmt.Sprintf("Do you want to rename org \"%s\" to \"%s\"?", color.YellowString(name), color.YellowString(newName)) // nolint:gocritic // Because it uses colors
+				ok, err := cmdutil.ConfirmPrompt(msg, "", false)
+				if err != nil {
+					return err
+				}
+				if !ok {
 					return nil
 				}
 			}
@@ -70,12 +75,14 @@ func RenameCmd(ch *cmdutil.Helper) *cobra.Command {
 				return err
 			}
 
-			ch.Printer.PrintlnSuccess("Renamed organization")
-			return ch.Printer.PrintResource([]*organization{toRow(updatedOrg.Organization)})
+			ch.PrintfSuccess("Renamed organization\n")
+			ch.PrintOrgs([]*adminv1.Organization{updatedOrg.Organization}, "")
+
+			return nil
 		},
 	}
 	renameCmd.Flags().SortFlags = false
-	renameCmd.Flags().StringVar(&name, "org", cfg.Org, "Current Org Name")
+	renameCmd.Flags().StringVar(&name, "org", ch.Org, "Current Org Name")
 	renameCmd.Flags().StringVar(&newName, "new-name", "", "New Org Name")
 	renameCmd.Flags().BoolVar(&force, "force", false, "Force rename org without confirmation prompt")
 

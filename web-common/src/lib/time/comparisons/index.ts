@@ -1,20 +1,32 @@
-import { TIME_COMPARISON } from "@rilldata/web-common/lib/time/config";
+import {
+  DEFAULT_TIME_RANGES,
+  TIME_COMPARISON,
+} from "@rilldata/web-common/lib/time/config";
+import { prettyFormatTimeRange } from "@rilldata/web-common/lib/time/ranges";
+import { humaniseISODuration } from "@rilldata/web-common/lib/time/ranges/iso-ranges";
+import type {
+  V1ExploreTimeRange,
+  V1TimeRange,
+} from "@rilldata/web-common/runtime-client";
 import { Duration, Interval } from "luxon";
 import { getTimeWidth, transformDate } from "../transforms";
 import {
-  RelativeTimeTransformation,
+  type RelativeTimeTransformation,
   TimeComparisonOption,
   TimeOffsetType,
+  TimeRangePreset,
 } from "../types";
 
 export function getComparisonTransform(
   start: Date,
   end: Date,
-  comparison: TimeComparisonOption
+  comparison: TimeComparisonOption,
 ): RelativeTimeTransformation {
   if (
     comparison === TimeComparisonOption.CONTIGUOUS ||
-    comparison === TimeComparisonOption.CUSTOM
+    comparison === TimeComparisonOption.CUSTOM ||
+    // @ts-expect-error Hack for `comparison` not being the correct type
+    comparison === TimeRangePreset.CUSTOM
   ) {
     /** for custom & otherwise-contiguous comparisons,
      * we will calculate the width of the time range
@@ -40,7 +52,7 @@ export function getComparisonTransform(
 export function getComparisonRange(
   start: Date,
   end: Date,
-  comparison: TimeComparisonOption
+  comparison: TimeComparisonOption,
 ) {
   const transform = getComparisonTransform(start, end, comparison);
   return {
@@ -59,7 +71,7 @@ export function getComparionRangeForScrub(
   comparisonStart: Date,
   comparisonEnd: Date,
   scrubStart: Date,
-  scrubEnd: Date
+  scrubEnd: Date,
 ) {
   // validate if selected range and comparison range are of equal width
   if (
@@ -86,13 +98,13 @@ export function isComparisonInsideBounds(
   boundEnd: Date,
   start: Date,
   end: Date,
-  comparison: TimeComparisonOption
+  comparison: TimeComparisonOption,
 ) {
   // compute comparison start and ends.
   const { start: comparisonStart, end: comparisonEnd } = getComparisonRange(
     start,
     end,
-    comparison
+    comparison,
   );
   // check if comparison bounds are inside the bounds.
   return comparisonStart >= boundStart && comparisonEnd <= boundEnd;
@@ -101,11 +113,17 @@ export function isComparisonInsideBounds(
 export function isRangeLargerThanDuration(
   start: Date,
   end: Date,
-  duration: string
+  duration: string,
 ) {
-  if (duration === TimeComparisonOption.CONTIGUOUS) {
+  if (duration === TimeComparisonOption.CONTIGUOUS.toString()) {
     return false;
   }
+
+  // To account for possible leap years
+  if (duration === "P1Y") {
+    return end.getFullYear() - start.getFullYear() > 1;
+  }
+
   return (
     Interval.fromDateTimes(start, end).toDuration().toMillis() >
     Duration.fromISO(duration).toMillis()
@@ -113,24 +131,28 @@ export function isRangeLargerThanDuration(
 }
 
 // Checks if last period is a duplicate comparison.
-function isLastPeriodDuplicate(start: Date, end: Date) {
+function isLastPeriodDuplicate(
+  start: Date,
+  end: Date,
+  comparisonOptions: Array<TimeComparisonOption>,
+) {
   const lastPeriod = getComparisonRange(
     start,
     end,
-    TimeComparisonOption.CONTIGUOUS
+    TimeComparisonOption.CONTIGUOUS,
   );
 
-  const comparisonOptions = [...Object.values(TimeComparisonOption)].filter(
+  comparisonOptions = comparisonOptions.filter(
     (option) =>
       option !== TimeComparisonOption.CUSTOM &&
-      option !== TimeComparisonOption.CONTIGUOUS
+      option !== TimeComparisonOption.CONTIGUOUS,
   );
 
   return comparisonOptions.some((option) => {
     const { start: comparisonStart, end: comparisonEnd } = getComparisonRange(
       start,
       end,
-      option
+      option,
     );
     return (
       comparisonStart.getTime() === lastPeriod.start.getTime() &&
@@ -153,9 +175,6 @@ export function getAvailableComparisonsForTimeRange(
   start: Date,
   end: Date,
   comparisonOptions: TimeComparisonOption[],
-  // the set of additional comparisons we should keep in mind, but not
-  // necessarily the right widt.
-  acceptedComparisons: TimeComparisonOption[] = []
 ) {
   let comparisons = comparisonOptions.filter((comparison) => {
     if (comparison === TimeComparisonOption.CUSTOM) {
@@ -163,43 +182,45 @@ export function getAvailableComparisonsForTimeRange(
     }
 
     return (
-      acceptedComparisons.includes(comparison) ||
-      (isComparisonInsideBounds(
+      isComparisonInsideBounds(
         boundStart,
         boundEnd,
         start,
         end,
         // treat a custom comparison as contiguous.
-        comparison
+        comparison,
       ) &&
-        !isRangeLargerThanDuration(
-          start,
-          end,
-          TIME_COMPARISON[comparison].offsetIso
-        ))
+      !isRangeLargerThanDuration(
+        start,
+        end,
+        TIME_COMPARISON[comparison].offsetIso,
+      )
     );
   });
 
-  if (isLastPeriodDuplicate(start, end)) {
+  if (isLastPeriodDuplicate(start, end, comparisonOptions)) {
     comparisons = comparisons.filter(
-      (comparison) => comparison !== TimeComparisonOption.CONTIGUOUS
+      (comparison) => comparison !== TimeComparisonOption.CONTIGUOUS,
     );
   }
+
   return comparisons;
 }
 
 /** A convenience function that gets comparison range and states whether it is within bounds. */
 export function getTimeComparisonParametersForComponent(
   comparisonOption: TimeComparisonOption | undefined,
-  boundStart,
-  boundEnd,
-  currentStart,
-  currentEnd
+  boundStart: Date | null | undefined,
+  boundEnd: Date | null | undefined,
+  currentStart: Date | null | undefined,
+  currentEnd: Date | null | undefined,
 ) {
   if (
-    comparisonOption === undefined ||
-    boundStart === undefined ||
-    currentStart === undefined
+    !comparisonOption ||
+    !boundStart ||
+    !currentStart ||
+    !currentEnd ||
+    !boundEnd
   ) {
     return {
       start: undefined,
@@ -211,7 +232,7 @@ export function getTimeComparisonParametersForComponent(
   const { start, end } = getComparisonRange(
     currentStart,
     currentEnd,
-    comparisonOption
+    comparisonOption,
   );
 
   const isComparisonRangeAvailable = isComparisonInsideBounds(
@@ -219,7 +240,7 @@ export function getTimeComparisonParametersForComponent(
     boundEnd,
     start,
     end,
-    comparisonOption
+    comparisonOption,
   );
 
   return {
@@ -227,4 +248,43 @@ export function getTimeComparisonParametersForComponent(
     end,
     isComparisonRangeAvailable,
   };
+}
+
+export function getComparisonLabel(comparisonTimeRange: V1TimeRange) {
+  if (
+    !comparisonTimeRange.isoOffset ||
+    comparisonTimeRange.isoOffset === TimeRangePreset.CUSTOM
+  ) {
+    return prettyFormatTimeRange(
+      new Date(comparisonTimeRange.start ?? ""),
+      new Date(comparisonTimeRange.end ?? ""),
+      TimeRangePreset.CUSTOM,
+      "UTC", // TODO
+    );
+  }
+  switch (true) {
+    case comparisonTimeRange.isoOffset === TimeRangePreset.ALL_TIME:
+      return "All time";
+    case comparisonTimeRange.isoDuration === comparisonTimeRange.isoOffset:
+      return "Previous period";
+    case comparisonTimeRange.isoOffset in TIME_COMPARISON:
+      return TIME_COMPARISON[comparisonTimeRange.isoOffset].label;
+    default:
+      return `Last ${humaniseISODuration(comparisonTimeRange.isoOffset)}`;
+  }
+}
+
+export function inferCompareTimeRange(
+  timeRanges: V1ExploreTimeRange[] | undefined,
+  selectedTimeRangeName: string,
+) {
+  const defaultForTimeRange = DEFAULT_TIME_RANGES[
+    selectedTimeRangeName as TimeComparisonOption
+  ]?.defaultComparison as TimeComparisonOption;
+  return (
+    defaultForTimeRange ??
+    timeRanges?.find((tr) => tr.range === selectedTimeRangeName)
+      ?.comparisonTimeRanges?.[0]?.offset ??
+    TimeComparisonOption.CONTIGUOUS
+  );
 }

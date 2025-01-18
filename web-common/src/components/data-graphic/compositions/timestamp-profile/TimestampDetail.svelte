@@ -13,10 +13,11 @@
    * The graph will contain an unsmoothed series (showing noise * abnormalities) by default, and
    * a smoothed series (showing the trend) if the time series merits it.
    */
-  import { notifications } from "@rilldata/web-common/components/notifications";
   import Tooltip from "@rilldata/web-common/components/tooltip/Tooltip.svelte";
-  import { createShiftClickAction } from "@rilldata/web-common/lib/actions/shift-click-action";
+  import { copyToClipboard } from "@rilldata/web-common/lib/actions/copy-to-clipboard";
+  import { modified } from "@rilldata/web-common/lib/actions/modified-click";
   import { guidGenerator } from "@rilldata/web-common/lib/guid";
+  import { timeGrainToDuration } from "@rilldata/web-common/lib/time/grains";
   import { removeLocalTimezoneOffset } from "@rilldata/web-common/lib/time/timezone";
   import type { V1TimeGrain } from "@rilldata/web-common/runtime-client";
   import { bisector, extent, max, min } from "d3-array";
@@ -203,7 +204,7 @@
   $: X.set(
     scaleLinear()
       .domain([$xMin, $xMax])
-      .range([$plotConfig.plotLeft, $plotConfig.plotRight])
+      .range([$plotConfig.plotLeft, $plotConfig.plotRight]),
   );
 
   // Generate the line density by dividing the total available pixels by the window length.
@@ -218,7 +219,7 @@
   $: Y.set(
     scaleLinear()
       .domain([0, $yMax])
-      .range([$plotConfig.plotBottom, $plotConfig.plotTop])
+      .range([$plotConfig.plotBottom, $plotConfig.plotTop]),
   );
 
   // get the nearest point to where the cursor is.
@@ -257,7 +258,7 @@
         .filter((di) => {
           return di[xAccessor] >= xStart && di[xAccessor] <= xEnd;
         })
-        .reduce((sum, di) => (sum += di[yAccessor]), 0)
+        .reduce((sum, di) => (sum += di[yAccessor]), 0),
     );
   } else if (zoomedXStart !== undefined && zoomedXEnd !== undefined) {
     // these two local constants are needed to appease the compiler.
@@ -268,7 +269,7 @@
         .filter((di) => {
           return di[xAccessor] >= localXStart && di[xAccessor] <= localXEnd;
         })
-        .reduce((sum, di) => (sum += di[yAccessor]), 0)
+        .reduce((sum, di) => (sum += di[yAccessor]), 0),
     );
   }
 
@@ -288,13 +289,22 @@
       ? $X.invert(Math.max($zoomCoords.start.x, $zoomCoords.stop.x))
       : max([zoomedXStart, zoomedXEnd])) || xExtents[1];
 
-  /**
-   * Use this shiftClickAction to copy the timestamp that is currently moused over.
-   */
-  const { shiftClickAction } = createShiftClickAction();
+  function shiftClick() {
+    const exportedValue = `TIMESTAMP '${removeLocalTimezoneOffset(
+      nearestPoint[xAccessor],
+      timeGrainToDuration(rollupTimeGrain),
+    ).toISOString()}'`;
+    copyToClipboard(exportedValue);
+  }
 </script>
 
-<div style:max-width="{width}px">
+<div
+  role="presentation"
+  style:max-width="{width}px"
+  on:click={modified({
+    shift: shiftClick,
+  })}
+>
   <TimestampProfileSummary
     start={xExtents[0]}
     end={xExtents[1]}
@@ -309,18 +319,6 @@
       style:cursor={setCursor($isZooming, $isScrolling)}
       use:scrubAction
       use:scrollAction
-      use:shiftClickAction
-      on:shift-click={async () => {
-        const exportedValue = `TIMESTAMP '${removeLocalTimezoneOffset(
-          nearestPoint[xAccessor]
-        ).toISOString()}'`;
-        await navigator.clipboard.writeText(exportedValue);
-        setTimeout(() => {
-          notifications.send({
-            message: `copied ${exportedValue} to clipboard`,
-          });
-        }, 200);
-      }}
       on:scrolling={(event) => {
         if (isZoomed && zoomedXStart && zoomedXEnd) {
           // clear the tooltip shake effect zeroing timeout.
@@ -349,10 +347,10 @@
       on:scrub={(event) => {
         // set max and min here.
         zoomedXStart = new Date(
-          $X.invert(Math.min(event.detail.start.x, event.detail.stop.x))
+          $X.invert(Math.min(event.detail.start.x, event.detail.stop.x)),
         );
         zoomedXEnd = new Date(
-          $X.invert(Math.max(event.detail.start.x, event.detail.stop.x))
+          $X.invert(Math.max(event.detail.start.x, event.detail.stop.x)),
         );
         // mark that this graphic has been scrubbed.
         setTimeout(() => {
@@ -426,6 +424,7 @@
       {#if $coordinates.x}
         <TimestampMouseoverAnnotation
           point={nearestPoint}
+          grain={rollupTimeGrain}
           {xAccessor}
           {yAccessor}
         />
@@ -500,8 +499,18 @@
 
   <!-- Bottom time horizon labels -->
   <div class="select-none grid grid-cols-2 space-between">
-    <TimestampBound align="left" value={zoomMinBound} label="Min" />
-    <TimestampBound align="right" value={zoomMaxBound} label="Max" />
+    <TimestampBound
+      grain={rollupTimeGrain}
+      align="left"
+      value={zoomMinBound}
+      label="Min"
+    />
+    <TimestampBound
+      grain={rollupTimeGrain}
+      align="right"
+      value={zoomMaxBound}
+      label="Max"
+    />
   </div>
 </div>
 

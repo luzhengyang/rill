@@ -3,10 +3,10 @@ import {
   getUrlForPath,
 } from "@rilldata/web-common/lib/url-utils";
 import type { Page } from "@sveltejs/kit";
-import { Readable, writable } from "svelte/store";
-import { beforeAll, describe, it, SpyInstance, vi, expect } from "vitest";
+import { type Readable, writable } from "svelte/store";
+import { beforeAll, describe, it, type MockInstance, vi, expect } from "vitest";
 
-const pageMock: PageMock = vi.hoisted(() => ({} as any));
+const pageMock: PageMock = vi.hoisted(() => ({}) as any);
 
 vi.mock("$app/navigation", () => {
   return {
@@ -54,17 +54,17 @@ describe("url-utils", () => {
 
   it("getFullUrlForPath with explicit retainParam", () => {
     pageMock.goto(
-      "/path/to/dashboard?features=all&state=qwerty&partner=asdfgh"
+      "/path/to/dashboard?features=all&state=qwerty&partner=asdfgh",
     );
     expect(
-      getFullUrlForPath("/new/path/to/dashboard", ["state", "partner"])
+      getFullUrlForPath("/new/path/to/dashboard", ["state", "partner"]),
     ).toBe("/new/path/to/dashboard?state=qwerty&partner=asdfgh");
   });
 
   it("getFullUrl with https link", () => {
     pageMock.setUrl("https://ui.rilldata.com/path/to/dashboard");
     expect(getUrlForPath("/new/path/to/dashboard").toString()).toBe(
-      "https://ui.rilldata.com/new/path/to/dashboard"
+      "https://ui.rilldata.com/new/path/to/dashboard",
     );
   });
 });
@@ -73,7 +73,7 @@ type PageMock = Readable<Page> & {
   updateState: (state: string) => void;
   goto: (path: string) => void;
   setUrl: (url: string) => void;
-  gotoSpy: SpyInstance;
+  gotoSpy: MockInstance;
 };
 function createPageMock() {
   const { update, subscribe } = writable<Page>({

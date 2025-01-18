@@ -13,12 +13,13 @@ func TestInformationSchemaAll(t *testing.T) {
 	conn := prepareConn(t)
 	olap, _ := conn.AsOLAP("")
 
-	err := olap.Exec(context.Background(), &drivers.Statement{
-		Query: "CREATE VIEW model as (select 1, 2, 3)",
-	})
+	opts := &drivers.CreateTableOptions{
+		View: true,
+	}
+	err := olap.CreateTableAsSelect(context.Background(), "model", "select 1, 2, 3", opts)
 	require.NoError(t, err)
 
-	tables, err := olap.InformationSchema().All(context.Background())
+	tables, err := olap.InformationSchema().All(context.Background(), "")
 	require.NoError(t, err)
 	require.Equal(t, 3, len(tables))
 
@@ -35,24 +36,42 @@ func TestInformationSchemaAll(t *testing.T) {
 	require.Equal(t, true, tables[2].View)
 }
 
+func TestInformationSchemaAllLike(t *testing.T) {
+	conn := prepareConn(t)
+	olap, _ := conn.AsOLAP("")
+
+	opts := &drivers.CreateTableOptions{View: true}
+	err := olap.CreateTableAsSelect(context.Background(), "model", "select 1, 2, 3", opts)
+	require.NoError(t, err)
+
+	tables, err := olap.InformationSchema().All(context.Background(), "%odel")
+	require.NoError(t, err)
+	require.Equal(t, 1, len(tables))
+	require.Equal(t, "model", tables[0].Name)
+
+	tables, err = olap.InformationSchema().All(context.Background(), "%model%")
+	require.NoError(t, err)
+	require.Equal(t, 1, len(tables))
+	require.Equal(t, "model", tables[0].Name)
+}
+
 func TestInformationSchemaLookup(t *testing.T) {
 	conn := prepareConn(t)
 	olap, _ := conn.AsOLAP("")
 	ctx := context.Background()
 
-	err := olap.Exec(ctx, &drivers.Statement{
-		Query: "CREATE VIEW model as (select 1, 2, 3)",
-	})
+	opts := &drivers.CreateTableOptions{View: true}
+	err := olap.CreateTableAsSelect(context.Background(), "model", "select 1, 2, 3", opts)
 	require.NoError(t, err)
 
-	table, err := olap.InformationSchema().Lookup(ctx, "foo")
+	table, err := olap.InformationSchema().Lookup(ctx, "", "", "foo")
 	require.NoError(t, err)
 	require.Equal(t, "foo", table.Name)
 
-	_, err = olap.InformationSchema().Lookup(ctx, "bad")
+	_, err = olap.InformationSchema().Lookup(ctx, "", "", "bad")
 	require.Equal(t, drivers.ErrNotFound, err)
 
-	table, err = olap.InformationSchema().Lookup(ctx, "model")
+	table, err = olap.InformationSchema().Lookup(ctx, "", "", "model")
 	require.NoError(t, err)
 	require.Equal(t, "model", table.Name)
 }

@@ -5,137 +5,194 @@
    * Create a table with the selected dimension and measures
    * to be displayed in explore
    */
-  import { cancelDashboardQueries } from "@rilldata/web-common/features/dashboards/dashboard-queries";
-
   import { getStateManagers } from "@rilldata/web-common/features/dashboards/state-managers/state-managers";
-  import { useTimeControlStore } from "@rilldata/web-common/features/dashboards/time-controls/time-control-store";
+  import { eventBus } from "@rilldata/web-common/lib/event-bus/event-bus";
   import {
-    createQueryServiceMetricsViewComparison,
-    createQueryServiceMetricsViewTotals,
+    createQueryServiceMetricsViewAggregation,
+    type MetricsViewSpecDimensionV2,
+    type V1Expression,
+    type V1MetricsViewAggregationMeasure,
+    type V1MetricsViewSpec,
+    type V1TimeRange,
   } from "@rilldata/web-common/runtime-client";
-  import { useQueryClient } from "@tanstack/svelte-query";
-  import { getDimensionFilterWithSearch } from "./dimension-table-utils";
+  import { runtime } from "@rilldata/web-common/runtime-client/runtime-store";
+  import { getComparisonRequestMeasures } from "../dashboard-utils";
+  import { mergeDimensionAndMeasureFilter } from "../filters/measure-filters/measure-filter-utils";
+  import { getSort } from "../leaderboard/leaderboard-utils";
+  import { getFiltersForOtherDimensions } from "../selectors";
+  import { getMeasuresForDimensionTable } from "../state-managers/selectors/dashboard-queries";
+  import { dimensionSearchText } from "../stores/dashboard-stores";
+  import { sanitiseExpression } from "../stores/filter-utils";
+  import type { DimensionThresholdFilter } from "../stores/metrics-explorer-entity";
   import DimensionHeader from "./DimensionHeader.svelte";
   import DimensionTable from "./DimensionTable.svelte";
-  import { notifications } from "@rilldata/web-common/components/notifications";
-  import { metricsExplorerStore } from "../stores/dashboard-stores";
+  import { getDimensionFilterWithSearch } from "./dimension-table-utils";
 
-  const stateManagers = getStateManagers();
+  const queryLimit = 250;
+
+  export let activeMeasureName: string;
+  export let timeRange: V1TimeRange;
+  export let comparisonTimeRange: V1TimeRange | undefined;
+  export let whereFilter: V1Expression;
+  export let metricsViewName: string;
+  export let dimensionThresholdFilters: DimensionThresholdFilter[];
+  export let metricsView: V1MetricsViewSpec;
+  export let visibleMeasureNames: string[];
+  export let timeControlsReady: boolean;
+  export let dimension: MetricsViewSpecDimensionV2;
+  export let hideStartPivotButton = false;
+
   const {
-    dashboardStore,
     selectors: {
-      dashboardQueries: {
-        dimensionTableSortedQueryBody,
-        dimensionTableTotalQueryBody,
-      },
-      comparison: { isBeingCompared },
-      dimensions: { dimensionTableDimName, dimensionTableColumnName },
+      dimensionFilters: { unselectedDimensionValues },
       dimensionTable: {
         virtualizedTableColumns,
         selectedDimensionValueNames,
         prepareDimTableRows,
       },
-      activeMeasure: { activeMeasureName },
+      sorting: { sortedAscending, sortType },
     },
-    metricsViewName,
-    runtime,
-  } = stateManagers;
+    actions: {
+      dimensionsFilter: {
+        toggleDimensionValueSelection,
+        selectItemsInFilter,
+        deselectItemsInFilter,
+      },
+    },
+  } = getStateManagers();
 
-  // cast is safe because dimensionTableDimName must be defined
-  // for the dimension table to be open
-  $: dimensionName = $dimensionTableDimName as string;
-  $: dimensionColumnName = $dimensionTableColumnName(dimensionName) as string;
+  $: ({ name: dimensionName = "" } = dimension);
 
-  let searchText = "";
-
-  const queryClient = useQueryClient();
-
-  $: instanceId = $runtime.instanceId;
-
-  const timeControlsStore = useTimeControlStore(stateManagers);
+  $: ({ instanceId } = $runtime);
 
   $: filterSet = getDimensionFilterWithSearch(
-    $dashboardStore?.filters,
-    searchText,
-    dimensionName
+    whereFilter,
+    $dimensionSearchText,
+    dimensionName,
   );
 
-  $: totalsQuery = createQueryServiceMetricsViewTotals(
+  $: totalsQuery = createQueryServiceMetricsViewAggregation(
     instanceId,
-    $metricsViewName,
-    $dimensionTableTotalQueryBody,
+    metricsViewName,
+    {
+      measures: visibleMeasureNames.map((measureName) => ({
+        name: measureName,
+      })),
+      where: sanitiseExpression(
+        mergeDimensionAndMeasureFilter(
+          getFiltersForOtherDimensions(whereFilter, dimensionName),
+          dimensionThresholdFilters,
+        ),
+        undefined,
+      ),
+      timeStart: timeRange.start,
+      timeEnd: timeRange.end,
+    },
     {
       query: {
-        enabled: $timeControlsStore.ready,
+        enabled: timeControlsReady,
       },
-    }
+    },
   );
 
-  $: unfilteredTotal = $totalsQuery?.data?.data?.[$activeMeasureName] ?? 0;
+  $: unfilteredTotal = $totalsQuery?.data?.data?.[0]?.[activeMeasureName] ?? 0;
 
   $: columns = $virtualizedTableColumns($totalsQuery);
 
-  $: sortedQuery = createQueryServiceMetricsViewComparison(
-    $runtime.instanceId,
-    $metricsViewName,
-    $dimensionTableSortedQueryBody,
+  $: measures = getMeasuresForDimensionTable(
+    activeMeasureName,
+    dimensionThresholdFilters,
+    metricsView,
+    visibleMeasureNames,
+  )
+    .map(
+      (n) =>
+        ({
+          name: n,
+        }) as V1MetricsViewAggregationMeasure,
+    )
+    .concat(
+      ...(comparisonTimeRange
+        ? getComparisonRequestMeasures(activeMeasureName)
+        : []),
+    );
+
+  $: sortedQuery = createQueryServiceMetricsViewAggregation(
+    instanceId,
+    metricsViewName,
+    {
+      dimensions: [{ name: dimensionName }],
+      measures,
+      timeRange,
+      comparisonTimeRange,
+      sort: getSort(
+        $sortedAscending,
+        $sortType,
+        activeMeasureName,
+        dimensionName,
+        !!comparisonTimeRange,
+      ),
+      where: sanitiseExpression(
+        mergeDimensionAndMeasureFilter(filterSet, dimensionThresholdFilters),
+        undefined,
+      ),
+      limit: queryLimit.toString(),
+      offset: "0",
+    },
     {
       query: {
-        enabled: $timeControlsStore.ready && !!filterSet,
+        enabled: timeControlsReady && !!filterSet,
       },
-    }
+    },
   );
 
   $: tableRows = $prepareDimTableRows($sortedQuery, unfilteredTotal);
 
   $: areAllTableRowsSelected = tableRows.every((row) =>
-    $selectedDimensionValueNames.includes(row[dimensionColumnName] as string)
+    $selectedDimensionValueNames.includes(row[dimensionName] as string),
   );
 
   function onSelectItem(event) {
-    const label = tableRows[event.detail][dimensionColumnName] as string;
-    cancelDashboardQueries(queryClient, $metricsViewName);
-    metricsExplorerStore.toggleFilter($metricsViewName, dimensionName, label);
-  }
-
-  function toggleComparisonDimension(dimensionName, isBeingCompared) {
-    metricsExplorerStore.setComparisonDimension(
-      $metricsViewName,
-      isBeingCompared ? undefined : dimensionName
+    const label = tableRows[event.detail.index][dimensionName] as string;
+    toggleDimensionValueSelection(
+      dimensionName,
+      label,
+      false,
+      event.detail.meta,
     );
   }
 
   function toggleAllSearchItems() {
-    const labels = tableRows.map((row) => row[dimensionColumnName] as string);
-    cancelDashboardQueries(queryClient, $metricsViewName);
+    const labels = tableRows.map((row) => row[dimensionName] as string);
 
     if (areAllTableRowsSelected) {
-      metricsExplorerStore.deselectItemsInFilter(
-        $metricsViewName,
-        dimensionName,
-        labels
-      );
+      deselectItemsInFilter(dimensionName, labels);
 
-      notifications.send({
+      eventBus.emit("notification", {
         message: `Removed ${labels.length} items from filter`,
       });
       return;
     } else {
-      const newValuesSelected = metricsExplorerStore.selectItemsInFilter(
-        $metricsViewName,
+      const newValuesSelected = $unselectedDimensionValues(
         dimensionName,
-        labels
+        labels,
       );
-      notifications.send({
-        message: `Added ${newValuesSelected} items to filter`,
+      selectItemsInFilter(dimensionName, labels);
+      eventBus.emit("notification", {
+        message: `Added ${newValuesSelected.length} items to filter`,
       });
     }
   }
 
-  function handleKeyDown(e) {
-    // Select all items on Meta+A
+  // Select all items on Meta+A
+  function handleKeyDown(
+    e: KeyboardEvent & {
+      currentTarget: EventTarget & Window;
+    },
+  ) {
     if ((e.ctrlKey || e.metaKey) && e.key === "a") {
-      if (e.target.tagName === "INPUT") return;
+      if (e.target instanceof HTMLElement && e.target.tagName === "INPUT")
+        return;
       e.preventDefault();
       if (areAllTableRowsSelected) return;
       toggleAllSearchItems();
@@ -143,18 +200,17 @@
   }
 </script>
 
-{#if sortedQuery}
-  <div class="h-full flex flex-col" style:min-width="365px">
+{#if $sortedQuery}
+  <div class="h-full flex flex-col w-full" style:min-width="365px">
     <div class="flex-none" style:height="50px">
       <DimensionHeader
         {dimensionName}
         {areAllTableRowsSelected}
         isRowsEmpty={!tableRows.length}
         isFetching={$sortedQuery?.isFetching}
-        on:search={(event) => {
-          searchText = event.detail;
-        }}
-        on:toggle-all-search-items={() => toggleAllSearchItems()}
+        bind:searchText={$dimensionSearchText}
+        onToggleSearchItems={toggleAllSearchItems}
+        {hideStartPivotButton}
       />
     </div>
 
@@ -162,8 +218,6 @@
       <div class="grow" style="overflow-y: hidden;">
         <DimensionTable
           on:select-item={(event) => onSelectItem(event)}
-          on:toggle-dimension-comparison={() =>
-            toggleComparisonDimension(dimensionName, isBeingCompared)}
           isFetching={$sortedQuery?.isFetching}
           {dimensionName}
           {columns}

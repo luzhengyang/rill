@@ -2,7 +2,9 @@ package project
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/rilldata/rill/cli/pkg/cmdutil"
 	adminv1 "github.com/rilldata/rill/proto/gen/rill/admin/v1"
@@ -16,32 +18,31 @@ func LogsCmd(ch *cmdutil.Helper) *cobra.Command {
 	var name, path string
 	var follow bool
 	var tail int
+	var level string
 
 	logsCmd := &cobra.Command{
 		Use:   "logs [<project-name>]",
 		Args:  cobra.MaximumNArgs(1),
 		Short: "Show project logs",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg := ch.Config
-			client, err := cmdutil.Client(cfg)
+			client, err := ch.Client()
 			if err != nil {
 				return err
 			}
-			defer client.Close()
 
 			if len(args) > 0 {
 				name = args[0]
 			}
 
-			if !cmd.Flags().Changed("project") && len(args) == 0 && cfg.Interactive {
-				name, err = inferProjectName(cmd.Context(), client, cfg.Org, path)
+			if !cmd.Flags().Changed("project") && len(args) == 0 && ch.Interactive {
+				name, err = ch.InferProjectName(cmd.Context(), ch.Org, path)
 				if err != nil {
-					return err
+					return fmt.Errorf("unable to infer project name (use `--project` to explicitly specify the name): %w", err)
 				}
 			}
 
-			proj, err := client.GetProject(context.Background(), &adminv1.GetProjectRequest{
-				OrganizationName: cfg.Org,
+			proj, err := client.GetProject(cmd.Context(), &adminv1.GetProjectRequest{
+				OrganizationName: ch.Org,
 				Name:             name,
 			})
 			if err != nil {
@@ -54,7 +55,7 @@ func LogsCmd(ch *cmdutil.Helper) *cobra.Command {
 			}
 
 			if depl.Status != adminv1.DeploymentStatus_DEPLOYMENT_STATUS_OK {
-				ch.Printer.PrintlnWarn(fmt.Sprintf("Deployment status not OK: %s", depl.Status.String()))
+				ch.PrintfWarn("Deployment status not OK: %s\n", depl.Status.String())
 				return nil
 			}
 
@@ -63,21 +64,27 @@ func LogsCmd(ch *cmdutil.Helper) *cobra.Command {
 				return fmt.Errorf("failed to connect to runtime: %w", err)
 			}
 
-			if follow {
-				logClient, err := rt.WatchLogs(context.Background(), &runtimev1.WatchLogsRequest{InstanceId: depl.RuntimeInstanceId, Replay: true, ReplayLimit: int32(tail)})
-				if err != nil {
-					return fmt.Errorf("failed to watch logs: %w", err)
-				}
+			lvl := toRuntimeLogLevel(level)
+			if lvl == runtimev1.LogLevel_LOG_LEVEL_UNSPECIFIED {
+				return fmt.Errorf("invalid log level: %s", level)
+			}
 
-				ctx, cancel := context.WithCancel(cmd.Context())
+			if follow {
+				ctx, cancel := context.WithCancelCause(cmd.Context())
+				defer cancel(nil)
 
 				go func() {
+					logs, err := rt.WatchLogs(ctx, &runtimev1.WatchLogsRequest{InstanceId: depl.RuntimeInstanceId, Replay: true, ReplayLimit: int32(tail), Level: lvl})
+					if err != nil {
+						cancel(fmt.Errorf("failed to watch logs: %w", err))
+						return
+					}
+
 					for {
-						res, err := logClient.Recv()
+						res, err := logs.Recv()
 						if err != nil {
-							fmt.Println("failed to receive logs: %w", err)
-							cancel()
-							break
+							cancel(fmt.Errorf("failed to receive logs: %w", err))
+							return
 						}
 
 						printLog(res.Log)
@@ -86,10 +93,15 @@ func LogsCmd(ch *cmdutil.Helper) *cobra.Command {
 
 				// keep on receiving logs util context is cancelled
 				<-ctx.Done()
-				return nil
+				err := context.Cause(ctx)
+				if errors.Is(err, context.Canceled) {
+					// Since user cancellation is expected for --follow, don't return an error if the cause was a context cancellation.
+					return nil
+				}
+				return context.Cause(ctx)
 			}
 
-			res, err := rt.GetLogs(context.Background(), &runtimev1.GetLogsRequest{InstanceId: depl.RuntimeInstanceId, Ascending: true, Limit: int32(tail)})
+			res, err := rt.GetLogs(cmd.Context(), &runtimev1.GetLogsRequest{InstanceId: depl.RuntimeInstanceId, Ascending: true, Limit: int32(tail), Level: lvl})
 			if err != nil {
 				return fmt.Errorf("failed to get logs: %w", err)
 			}
@@ -106,6 +118,7 @@ func LogsCmd(ch *cmdutil.Helper) *cobra.Command {
 	logsCmd.Flags().StringVar(&path, "path", ".", "Project directory")
 	logsCmd.Flags().BoolVarP(&follow, "follow", "f", false, "Follow logs")
 	logsCmd.Flags().IntVarP(&tail, "tail", "t", -1, "Number of lines to show from the end of the logs, use -1 for all logs")
+	logsCmd.Flags().StringVar(&level, "level", "INFO", "Minimum log level to show (DEBUG, INFO, WARN, ERROR, FATAL)")
 
 	return logsCmd
 }
@@ -128,7 +141,26 @@ func printLogLevel(logLevel runtimev1.LogLevel) string {
 		return "WARN"
 	case runtimev1.LogLevel_LOG_LEVEL_ERROR:
 		return "ERROR"
+	case runtimev1.LogLevel_LOG_LEVEL_FATAL:
+		return "FATAL"
 	default:
 		return "UNKNOWN"
+	}
+}
+
+func toRuntimeLogLevel(lvl string) runtimev1.LogLevel {
+	switch strings.ToUpper(lvl) {
+	case "DEBUG":
+		return runtimev1.LogLevel_LOG_LEVEL_DEBUG
+	case "INFO":
+		return runtimev1.LogLevel_LOG_LEVEL_INFO
+	case "WARN":
+		return runtimev1.LogLevel_LOG_LEVEL_WARN
+	case "ERROR":
+		return runtimev1.LogLevel_LOG_LEVEL_ERROR
+	case "FATAL":
+		return runtimev1.LogLevel_LOG_LEVEL_FATAL
+	default:
+		return runtimev1.LogLevel_LOG_LEVEL_UNSPECIFIED
 	}
 }

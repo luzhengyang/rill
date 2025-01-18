@@ -1,18 +1,25 @@
+import { mergeMeasureFilters } from "@rilldata/web-common/features/dashboards/filters/measure-filters/measure-filter-utils";
 import type { StateManagers } from "@rilldata/web-common/features/dashboards/state-managers/state-managers";
+import {
+  createAndExpression,
+  filterExpressions,
+  matchExpressionByName,
+  sanitiseExpression,
+} from "@rilldata/web-common/features/dashboards/stores/filter-utils";
 import { useTimeControlStore } from "@rilldata/web-common/features/dashboards/time-controls/time-control-store";
 import {
   createQueryServiceMetricsViewAggregation,
   type V1MetricsViewAggregationResponse,
 } from "@rilldata/web-common/runtime-client";
+import { type HTTPError } from "@rilldata/web-common/runtime-client/fetchWrapper";
 import type { CreateQueryResult } from "@tanstack/svelte-query";
 import { derived } from "svelte/store";
 
 export function createTotalsForMeasure(
   ctx: StateManagers,
-  measures,
+  measures: string[],
   isComparison = false,
-  noFilter = false
-): CreateQueryResult<V1MetricsViewAggregationResponse> {
+): CreateQueryResult<V1MetricsViewAggregationResponse, HTTPError> {
   return derived(
     [
       ctx.runtime,
@@ -26,20 +33,65 @@ export function createTotalsForMeasure(
         metricsViewName,
         {
           measures: measures.map((measure) => ({ name: measure })),
-          filter: noFilter ? { include: [], exclude: [] } : dashboard?.filters,
-          timeStart: isComparison
-            ? timeControls?.comparisonTimeStart
-            : timeControls.timeStart,
-          timeEnd: isComparison
-            ? timeControls?.comparisonTimeEnd
-            : timeControls.timeEnd,
+          where: sanitiseExpression(mergeMeasureFilters(dashboard), undefined),
+          timeRange: {
+            start: isComparison
+              ? timeControls?.comparisonTimeStart
+              : timeControls.timeStart,
+            end: isComparison
+              ? timeControls?.comparisonTimeEnd
+              : timeControls.timeEnd,
+          },
         },
         {
           query: {
             enabled: !!timeControls.ready && !!ctx.dashboardStore,
             queryClient: ctx.queryClient,
           },
-        }
-      ).subscribe(set)
+        },
+      ).subscribe(set),
+  );
+}
+
+export function createUnfilteredTotalsForMeasure(
+  ctx: StateManagers,
+  measures: string[],
+  dimensionName: string,
+): CreateQueryResult<V1MetricsViewAggregationResponse, HTTPError> {
+  return derived(
+    [
+      ctx.runtime,
+      ctx.metricsViewName,
+      useTimeControlStore(ctx),
+      ctx.dashboardStore,
+    ],
+    ([runtime, metricsViewName, timeControls, dashboard], set) => {
+      const filter = sanitiseExpression(
+        mergeMeasureFilters(dashboard),
+        undefined,
+      );
+
+      const updatedFilter = filterExpressions(
+        filter || createAndExpression([]),
+        (e) => !matchExpressionByName(e, dimensionName),
+      );
+
+      createQueryServiceMetricsViewAggregation(
+        runtime.instanceId,
+        metricsViewName,
+        {
+          measures: measures.map((measure) => ({ name: measure })),
+          where: updatedFilter,
+          timeStart: timeControls.timeStart,
+          timeEnd: timeControls.timeEnd,
+        },
+        {
+          query: {
+            enabled: !!timeControls.ready && !!ctx.dashboardStore,
+            queryClient: ctx.queryClient,
+          },
+        },
+      ).subscribe(set);
+    },
   );
 }

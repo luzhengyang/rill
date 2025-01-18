@@ -5,16 +5,16 @@
  */
 
 import { V1TimeGrain } from "@rilldata/web-common/runtime-client";
-import type { Duration } from "luxon";
+import type { Duration, DurationUnit } from "luxon";
 import {
-  AvailableTimeGrain,
+  type AvailableTimeGrain,
   Period,
   RangePresetType,
   ReferencePoint,
   TimeComparisonOption,
-  TimeGrain,
+  type TimeGrain,
   TimeOffsetType,
-  TimeRangeMeta,
+  type TimeRangeMeta,
   TimeRangePreset,
   TimeTruncationType,
 } from "./types";
@@ -114,7 +114,7 @@ export const LATEST_WINDOW_TIME_RANGES: TimeRangeMetaSet = {
   [TimeRangePreset.LAST_14_DAYS]: {
     label: "Last 14 Days",
     rangePreset: RangePresetType.OFFSET_ANCHORED,
-    defaultComparison: TimeComparisonOption.WEEK,
+    defaultComparison: TimeComparisonOption.CONTIGUOUS,
     start: {
       reference: ReferencePoint.LATEST_DATA,
       transformation: [
@@ -271,6 +271,30 @@ export const PERIOD_TO_DATE_RANGES: TimeRangeMetaSet = {
       ],
     },
   },
+  [TimeRangePreset.QUARTER_TO_DATE]: {
+    label: "Quarter to Date",
+    rangePreset: RangePresetType.PERIOD_ANCHORED,
+    defaultComparison: TimeComparisonOption.CONTIGUOUS,
+    start: {
+      reference: ReferencePoint.MIN_OF_LATEST_DATA_AND_NOW,
+      transformation: [
+        {
+          period: Period.QUARTER,
+          truncationType: TimeTruncationType.START_OF_PERIOD,
+        },
+      ],
+    },
+    end: {
+      reference: ReferencePoint.MIN_OF_LATEST_DATA_AND_NOW,
+      transformation: [
+        { duration: "P1D", operationType: TimeOffsetType.ADD },
+        {
+          period: Period.DAY,
+          truncationType: TimeTruncationType.START_OF_PERIOD,
+        },
+      ],
+    },
+  },
   [TimeRangePreset.YEAR_TO_DATE]: {
     label: "Year to Date",
     rangePreset: RangePresetType.PERIOD_ANCHORED,
@@ -290,6 +314,144 @@ export const PERIOD_TO_DATE_RANGES: TimeRangeMetaSet = {
         { duration: "P1D", operationType: TimeOffsetType.ADD },
         {
           period: Period.DAY,
+          truncationType: TimeTruncationType.START_OF_PERIOD,
+        },
+      ],
+    },
+  },
+};
+
+export const PREVIOUS_COMPLETE_DATE_RANGES: TimeRangeMetaSet = {
+  [TimeRangePreset.YESTERDAY_COMPLETE]: {
+    label: "Yesterday",
+    rangePreset: RangePresetType.PERIOD_ANCHORED,
+    defaultComparison: TimeComparisonOption.CONTIGUOUS,
+    start: {
+      reference: ReferencePoint.LATEST_DATA,
+      transformation: [
+        {
+          period: Period.DAY,
+          truncationType: TimeTruncationType.START_OF_PERIOD,
+        },
+        {
+          duration: "P1D",
+          operationType: TimeOffsetType.SUBTRACT,
+        },
+      ],
+    },
+    end: {
+      reference: ReferencePoint.LATEST_DATA,
+      transformation: [
+        {
+          period: Period.DAY,
+          truncationType: TimeTruncationType.START_OF_PERIOD,
+        },
+      ],
+    },
+  },
+  [TimeRangePreset.PREVIOUS_WEEK_COMPLETE]: {
+    label: "Previous week complete",
+    rangePreset: RangePresetType.PERIOD_ANCHORED,
+    defaultComparison: TimeComparisonOption.CONTIGUOUS,
+    start: {
+      reference: ReferencePoint.LATEST_DATA,
+      transformation: [
+        {
+          period: Period.WEEK,
+          truncationType: TimeTruncationType.START_OF_PERIOD,
+        },
+        {
+          duration: "P1W",
+          operationType: TimeOffsetType.SUBTRACT,
+        },
+      ],
+    },
+    end: {
+      reference: ReferencePoint.LATEST_DATA,
+      transformation: [
+        {
+          period: Period.WEEK,
+          truncationType: TimeTruncationType.START_OF_PERIOD,
+        },
+      ],
+    },
+  },
+  [TimeRangePreset.PREVIOUS_MONTH_COMPLETE]: {
+    label: "Previous month complete",
+    rangePreset: RangePresetType.PERIOD_ANCHORED,
+    defaultComparison: TimeComparisonOption.CONTIGUOUS,
+    start: {
+      reference: ReferencePoint.LATEST_DATA,
+      transformation: [
+        {
+          period: Period.MONTH,
+          truncationType: TimeTruncationType.START_OF_PERIOD,
+        },
+        {
+          duration: "P1M",
+          operationType: TimeOffsetType.SUBTRACT,
+        },
+      ],
+    },
+    end: {
+      reference: ReferencePoint.LATEST_DATA,
+      transformation: [
+        {
+          period: Period.MONTH,
+          truncationType: TimeTruncationType.START_OF_PERIOD,
+        },
+      ],
+    },
+  },
+  [TimeRangePreset.PREVIOUS_QUARTER_COMPLETE]: {
+    label: "Previous quarter complete",
+    rangePreset: RangePresetType.PERIOD_ANCHORED,
+    defaultComparison: TimeComparisonOption.CONTIGUOUS,
+    start: {
+      reference: ReferencePoint.MIN_OF_LATEST_DATA_AND_NOW,
+      transformation: [
+        {
+          period: Period.QUARTER,
+          truncationType: TimeTruncationType.START_OF_PERIOD,
+        },
+        {
+          duration: "P3M",
+          operationType: TimeOffsetType.SUBTRACT,
+        },
+      ],
+    },
+    end: {
+      reference: ReferencePoint.MIN_OF_LATEST_DATA_AND_NOW,
+      transformation: [
+        {
+          period: Period.QUARTER,
+          truncationType: TimeTruncationType.START_OF_PERIOD,
+        },
+      ],
+    },
+  },
+  [TimeRangePreset.PREVIOUS_YEAR_COMPLETE]: {
+    label: "Previous year complete",
+    rangePreset: RangePresetType.PERIOD_ANCHORED,
+    defaultComparison: TimeComparisonOption.CONTIGUOUS,
+    start: {
+      reference: ReferencePoint.MIN_OF_LATEST_DATA_AND_NOW,
+      transformation: [
+        {
+          period: Period.YEAR,
+          truncationType: TimeTruncationType.START_OF_PERIOD,
+        },
+        {
+          duration: "P1Y",
+          operationType: TimeOffsetType.SUBTRACT,
+        },
+      ],
+    },
+    end: {
+      reference: ReferencePoint.MIN_OF_LATEST_DATA_AND_NOW,
+      transformation: [
+        {
+          period: Period.YEAR,
           truncationType: TimeTruncationType.START_OF_PERIOD,
         },
       ],
@@ -320,6 +482,7 @@ export const DEFAULT = {
 export const DEFAULT_TIME_RANGES: TimeRangeMetaSet = {
   ...LATEST_WINDOW_TIME_RANGES,
   ...PERIOD_TO_DATE_RANGES,
+  ...PREVIOUS_COMPLETE_DATE_RANGES,
   [TimeRangePreset.ALL_TIME]: ALL_TIME,
   CUSTOM,
   DEFAULT,
@@ -330,6 +493,7 @@ export const DEFAULT_TIME_RANGES: TimeRangeMetaSet = {
  * e.g. "hour" or "day". The time grain is used to aggregate records
  * for the purposes of time series visualization and analysis.
  */
+
 export const TIME_GRAIN: Record<AvailableTimeGrain, TimeGrain> = {
   TIME_GRAIN_MINUTE: {
     grain: V1TimeGrain.TIME_GRAIN_MINUTE,
@@ -382,7 +546,7 @@ export const TIME_GRAIN: Record<AvailableTimeGrain, TimeGrain> = {
     grain: V1TimeGrain.TIME_GRAIN_MONTH,
     label: "month",
     duration: Period.MONTH,
-    d3format: "%b '%y",
+    d3format: "%b %Y",
     formatDate: {
       year: "numeric",
       month: "short",
@@ -392,7 +556,7 @@ export const TIME_GRAIN: Record<AvailableTimeGrain, TimeGrain> = {
     grain: V1TimeGrain.TIME_GRAIN_QUARTER,
     label: "quarter",
     duration: Period.QUARTER,
-    d3format: "%b '%y",
+    d3format: "Q%q %Y",
     formatDate: {
       year: "numeric",
       month: "short",
@@ -468,7 +632,7 @@ export const TIME_COMPARISON = {
   },
 };
 
-export const NO_COMPARISON_LABEL = "No comparison";
+export const NO_COMPARISON_LABEL = "No comparison dimension";
 
 export const DEFAULT_TIMEZONES = [
   "America/Los_Angeles",
@@ -489,7 +653,7 @@ export const DEFAULT_TIMEZONES = [
  */
 export const PeriodAndUnits: Array<{
   period: Period;
-  unit: keyof Duration;
+  unit: DurationUnit;
   grain: V1TimeGrain;
 }> = [
   {

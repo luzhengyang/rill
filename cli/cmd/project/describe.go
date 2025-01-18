@@ -17,25 +17,23 @@ func DescribeCmd(ch *cmdutil.Helper) *cobra.Command {
 	var project, path string
 
 	statusCmd := &cobra.Command{
-		Use:   "describe [<project-name>] <kind> <name>",
+		Use:   "describe [<project-name>] <type> <name>",
 		Args:  cobra.MatchAll(cobra.MinimumNArgs(2), cobra.MaximumNArgs(3)),
 		Short: "Retrieve detailed state for a resource",
 		Long:  "Retrieve detailed state for a specific resource (source, model, dashboard, ...)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg := ch.Config
-			client, err := cmdutil.Client(cfg)
+			client, err := ch.Client()
 			if err != nil {
 				return err
 			}
-			defer client.Close()
 
 			if len(args) == 3 {
 				project = args[0]
 			}
-			if !cmd.Flags().Changed("project") && len(args) == 2 && cfg.Interactive {
-				project, err = inferProjectName(cmd.Context(), client, cfg.Org, path)
+			if !cmd.Flags().Changed("project") && len(args) == 2 && ch.Interactive {
+				project, err = ch.InferProjectName(cmd.Context(), ch.Org, path)
 				if err != nil {
-					return err
+					return fmt.Errorf("unable to infer project name (use `--project` to explicitly specify the name): %w", err)
 				}
 			}
 
@@ -43,7 +41,7 @@ func DescribeCmd(ch *cmdutil.Helper) *cobra.Command {
 			name := args[len(args)-1]
 
 			proj, err := client.GetProject(cmd.Context(), &adminv1.GetProjectRequest{
-				OrganizationName: cfg.Org,
+				OrganizationName: ch.Org,
 				Name:             project,
 			})
 			if err != nil {
@@ -99,12 +97,26 @@ func parseResourceKind(k string) string {
 		return runtime.ResourceKindSource
 	case "model":
 		return runtime.ResourceKindModel
-	case "metricsview", "metrics_view", "dashboard":
+	case "metricsview", "metrics_view":
 		return runtime.ResourceKindMetricsView
+	case "explore":
+		return runtime.ResourceKindExplore
 	case "migration":
 		return runtime.ResourceKindMigration
 	case "report":
 		return runtime.ResourceKindReport
+	case "alert":
+		return runtime.ResourceKindAlert
+	case "theme":
+		return runtime.ResourceKindTheme
+	case "component":
+		return runtime.ResourceKindComponent
+	case "canvas":
+		return runtime.ResourceKindCanvas
+	case "api":
+		return runtime.ResourceKindAPI
+	case "connector":
+		return runtime.ResourceKindConnector
 	default:
 		return k
 	}

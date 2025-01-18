@@ -1,15 +1,18 @@
 import { Throttler } from "@rilldata/web-common/lib/throttler";
-import { pageInFocus } from "@rilldata/web-common/lib/viewport-utils";
-import { ExponentialBackoffTracker } from "@rilldata/web-common/runtime-client/exponential-backoff-tracker";
 import { streamingFetchWrapper } from "@rilldata/web-common/runtime-client/fetch-streaming-wrapper";
 import type {
   V1WatchFilesResponse,
   V1WatchLogsResponse,
   V1WatchResourcesResponse,
 } from "@rilldata/web-common/runtime-client/index";
-import type { Runtime } from "@rilldata/web-common/runtime-client/runtime-store";
-import { runtime } from "@rilldata/web-common/runtime-client/runtime-store";
-import { Unsubscriber, derived, get } from "svelte/store";
+import { get, writable } from "svelte/store";
+import { runtime } from "./runtime-store";
+import { asyncWait } from "../lib/waitUtils";
+
+const MAX_RETRIES = 5;
+const BACKOFF_DELAY = 1000;
+const RETRY_COUNT_DELAY = 500;
+const RECONNECT_CALLBACK_DELAY = 150;
 
 type WatchResponse =
   | V1WatchFilesResponse
@@ -21,105 +24,136 @@ type StreamingFetchResponse<Res extends WatchResponse> = {
   error?: { code: number; message: string };
 };
 
+type EventMap<T> = {
+  response: T;
+  reconnect: void;
+};
+
+type Listeners<T> = Map<keyof EventMap<T>, Callback<T, keyof EventMap<T>>[]>;
+
+type Callback<T, K extends keyof EventMap<T>> = (
+  eventData: EventMap<T>[K],
+) => void | Promise<void>;
+
 export class WatchRequestClient<Res extends WatchResponse> {
-  private controller: AbortController;
+  private url: string | undefined;
+  private controller: AbortController | undefined;
+  private stream: AsyncGenerator<StreamingFetchResponse<Res>> | undefined;
+  private outOfFocusThrottler = new Throttler(120000, 20000);
+  public retryAttempts = writable(0);
+  private reconnectTimeout: ReturnType<typeof setTimeout> | undefined;
+  private retryTimeout: ReturnType<typeof setTimeout> | undefined;
+  private listeners: Listeners<Res> = new Map([
+    ["response", []],
+    ["reconnect", []],
+  ]);
+  public closed = writable(false);
 
-  private prevInstanceId: string;
-  private prevHost: string;
-  private prevFocus = true;
-  private outOfFocusThrottler = new Throttler(5000);
-
-  public constructor(
-    private readonly getUrl: (runtime: Runtime) => string,
-    private readonly onResponse: (res: Res) => void | Promise<void>,
-    private readonly onReconnect: () => void | Promise<void>,
-    private readonly tracker = ExponentialBackoffTracker.createBasicTracker()
-  ) {}
-
-  public start(): Unsubscriber {
-    const store = derived([runtime, pageInFocus], (state) => state);
-    const unsubscribe = store.subscribe(([runtimeState, pageInFocus]) => {
-      const runtimeUnchanged =
-        runtimeState.instanceId === this.prevInstanceId &&
-        runtimeState.host === this.prevHost;
-
-      if (!runtimeState || runtimeUnchanged || !pageInFocus) {
-        if (!pageInFocus) {
-          this.prevInstanceId = this.prevHost = undefined;
-          this.prevFocus = false;
-          // cancel the watcher if page is not in focus
-          this.outOfFocusThrottler.throttle(() => {
-            this.controller?.abort();
-          });
-        }
-        return;
-      }
-      const prevFocus = this.prevFocus;
-      this.prevInstanceId = runtimeState.instanceId;
-      this.prevHost = runtimeState.host;
-      this.prevFocus = true;
-
-      if (this.outOfFocusThrottler.isThrottling()) {
-        // Cancel any callbacks for out of focus
-        this.outOfFocusThrottler.cancel();
-        // The client is already running. Do not cancel the client.
-        return;
-      }
-      // Call onReconnect on page focus to make sure we didnt miss anything
-      if (!prevFocus) {
-        this.onReconnect();
-      }
-      this.controller?.abort();
-      if (!runtimeState?.instanceId) return;
-
-      this.maintainConnection();
-    });
-
-    return () => {
-      this.controller?.abort();
-      unsubscribe();
-    };
+  public on<K extends keyof EventMap<Res>>(
+    event: K,
+    listener: Callback<Res, K>,
+  ) {
+    this.listeners.get(event)?.push(listener);
   }
 
-  private async maintainConnection() {
-    let firstRun = true;
-    // Maintain the controller here to make sure we check `aborted` for the correct one.
-    // Checking for `this.controller` might lead to edge cases where it has a newer controller after `runtime` changed.
-    let controller = new AbortController();
-
-    const url = this.getUrl(get(runtime));
-
-    while (!controller.signal.aborted) {
-      if (!firstRun) {
-        this.onReconnect();
-        // safeguard to cancel the request if not already cancelled
-        controller.abort();
-        controller = new AbortController();
-      }
-      firstRun = false;
-
-      this.controller = controller;
-      try {
-        const stream = this.getFetchStream(url, controller);
-
-        for await (const res of stream) {
-          if (res.error) throw new Error(res.error.message);
-          else if (res.result) this.onResponse(res.result);
-        }
-      } catch (err) {
-        if (!(await this.tracker.failed())) {
-          return;
-        }
-      }
+  public heartbeat = () => {
+    if (get(this.closed)) {
+      this.reconnect().catch(console.error);
     }
-    return;
+    this.throttle();
+  };
+
+  public watch(url: string) {
+    this.cancel();
+    this.url = url;
+
+    this.listen().catch(console.error);
+
+    // Start throttling after the first connection
+    this.throttle();
+  }
+
+  public close = () => {
+    this.cancel();
+    this.closed.set(true);
+  };
+
+  public throttle(prioritize: boolean = false) {
+    this.outOfFocusThrottler.throttle(this.close, prioritize);
+  }
+
+  private async reconnect() {
+    clearTimeout(this.reconnectTimeout);
+
+    if (this.outOfFocusThrottler.isThrottling()) {
+      this.outOfFocusThrottler.cancel();
+    }
+
+    // The stream was not cancelled, so don't reconnect
+    if (this.controller && !this.controller.signal.aborted) return;
+
+    const currentAttempts = get(this.retryAttempts);
+
+    if (currentAttempts >= MAX_RETRIES) throw new Error("Max retries exceeded");
+
+    if (currentAttempts > 0) {
+      const delay = BACKOFF_DELAY * 2 ** currentAttempts;
+      await asyncWait(delay);
+    }
+
+    this.retryAttempts.update((n) => n + 1);
+    this.listen(true).catch(console.error);
+  }
+
+  private cancel() {
+    this.controller?.abort();
+    this.stream = this.controller = undefined;
+  }
+
+  private async listen(reconnect = false) {
+    clearTimeout(this.reconnectTimeout);
+
+    if (!this.url) throw new Error("URL not set");
+
+    this.controller = new AbortController();
+    this.stream = this.getFetchStream(this.url, this.controller);
+
+    try {
+      this.retryTimeout = setTimeout(() => {
+        this.retryAttempts.set(0);
+      }, RETRY_COUNT_DELAY);
+
+      if (reconnect) {
+        this.reconnectTimeout = setTimeout(() => {
+          this.listeners.get("reconnect")?.forEach((cb) => void cb());
+        }, RECONNECT_CALLBACK_DELAY);
+      }
+
+      this.closed.set(false);
+      for await (const res of this.stream) {
+        if (this.controller?.signal.aborted) break;
+        if (res.error) throw new Error(res.error.message);
+
+        if (res.result)
+          this.listeners.get("response")?.forEach((cb) => void cb(res.result));
+      }
+    } catch {
+      clearTimeout(this.retryTimeout);
+
+      this.cancel();
+      if (get(this.closed)) return;
+
+      this.reconnect().catch((e) => {
+        throw new Error(e);
+      });
+    }
   }
 
   private getFetchStream(url: string, controller: AbortController) {
     const headers = { "Content-Type": "application/json" };
     const jwt = get(runtime).jwt;
     if (jwt) {
-      headers["Authorization"] = `Bearer ${jwt}`;
+      headers["Authorization"] = `Bearer ${jwt.token}`;
     }
 
     return streamingFetchWrapper<StreamingFetchResponse<Res>>(
@@ -127,7 +161,7 @@ export class WatchRequestClient<Res extends WatchResponse> {
       "GET",
       undefined,
       headers,
-      controller.signal
+      controller.signal,
     );
   }
 }

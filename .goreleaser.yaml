@@ -1,3 +1,5 @@
+version: 2
+
 project_name: rill
 
 release:
@@ -62,16 +64,35 @@ builds:
     ldflags:
       - -s -w -X main.Version={{.Version}} -X main.Commit={{.ShortCommit}} -X main.BuildDate={{.Date}}
 
+  - id: linux_aarch64
+    main: ./cli/main.go
+    binary: rill
+    goos:
+      - linux
+    goarch:
+      - arm64
+    env:
+      - CC=aarch64-linux-gnu-gcc
+      - CXX=aarch64-linux-gnu-g++
+      - CGO_CFLAGS=--sysroot=/sysroot/linux/arm64
+      - CGO_LDFLAGS=--sysroot=/sysroot/linux/arm64
+      - PKG_CONFIG_SYSROOT_DIR=/sysroot/linux/arm64
+      - PKG_CONFIG_PATH=/sysroot/linux/arm64/usr/local/lib/pkgconfig
+    flags:
+      - "-mod=readonly"
+    ldflags:
+      - -s -w -X main.Version={{.Version}} -X main.Commit={{.ShortCommit}} -X main.BuildDate={{.Date}}
+
 blobs:
   - provider: gs
     bucket: prod-cdn.rilldata.com
-    folder: "rill/v{{ .Version }}"
+    directory: "rill/v{{ .Version }}"
     extra_files:
       - glob: ./dist/**/*
 
   - provider: gs
     bucket: prod-cdn.rilldata.com
-    folder: "rill/latest"
+    directory: "rill/latest"
     extra_files:
       - glob: ./dist/**/*
 
@@ -81,7 +102,7 @@ brews:
     name: rill
     license: Apache 2.0
     url_template: https://cdn.rilldata.com/rill/{{ .Tag }}/{{ .ArtifactName }}
-    tap:
+    repository:
       owner: rilldata
       name: homebrew-tap
       branch: main
@@ -110,7 +131,7 @@ checksum:
   name_template: checksums.txt
 
 snapshot:
-  name_template: "{{ incpatch .Version }}-snapshot"
+  name_template: "{{ incminor .Version }}-nightly"
 
 changelog:
   sort: asc

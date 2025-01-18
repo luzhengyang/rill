@@ -41,7 +41,7 @@ func DeleteFiles(t testing.TB, rt *runtime.Runtime, id string, files ...string) 
 	defer release()
 
 	for _, path := range files {
-		err := repo.Delete(ctx, path)
+		err := repo.Delete(ctx, path, false)
 		require.NoError(t, err)
 	}
 }
@@ -65,10 +65,9 @@ func RefreshAndWait(t testing.TB, rt *runtime.Runtime, id string, n *runtimev1.R
 	ctrl, err := rt.Controller(context.Background(), id)
 	require.NoError(t, err)
 
-	// Get spec version before refresh
-	r, err := ctrl.Get(context.Background(), n, false)
+	// Get resource before refresh
+	rPrev, err := ctrl.Get(context.Background(), n, false)
 	require.NoError(t, err)
-	prevSpecVersion := r.Meta.SpecVersion
 
 	// Create refresh trigger
 	trgName := &runtimev1.ResourceName{Kind: runtime.ResourceKindRefreshTrigger, Name: time.Now().String()}
@@ -76,7 +75,7 @@ func RefreshAndWait(t testing.TB, rt *runtime.Runtime, id string, n *runtimev1.R
 		Resource: &runtimev1.Resource_RefreshTrigger{
 			RefreshTrigger: &runtimev1.RefreshTrigger{
 				Spec: &runtimev1.RefreshTriggerSpec{
-					OnlyNames: []*runtimev1.ResourceName{n},
+					Resources: []*runtimev1.ResourceName{n},
 				},
 			},
 		},
@@ -87,15 +86,19 @@ func RefreshAndWait(t testing.TB, rt *runtime.Runtime, id string, n *runtimev1.R
 	err = ctrl.WaitUntilIdle(context.Background(), false)
 	require.NoError(t, err)
 
+	// Get resource after refresh
+	rNew, err := ctrl.Get(context.Background(), n, false)
+	require.NoError(t, err)
+
 	// Check the resource's spec version has increased
-	require.Greater(t, r.Meta.SpecVersion, prevSpecVersion)
+	require.Greater(t, rNew.Meta.SpecVersion, rPrev.Meta.SpecVersion)
 }
 
 func RequireReconcileState(t testing.TB, rt *runtime.Runtime, id string, lenResources, lenReconcileErrs, lenParseErrs int) {
 	ctrl, err := rt.Controller(context.Background(), id)
 	require.NoError(t, err)
 
-	rs, err := ctrl.List(context.Background(), "", false)
+	rs, err := ctrl.List(context.Background(), "", "", false)
 	require.NoError(t, err)
 
 	var reconcileErrs, parseErrs []string
@@ -116,9 +119,25 @@ func RequireReconcileState(t testing.TB, rt *runtime.Runtime, id string, lenReso
 		names = append(names, fmt.Sprintf("%s/%s", r.Meta.Name.Kind, r.Meta.Name.Name))
 	}
 
-	require.Equal(t, lenParseErrs, len(parseErrs), "parse errors: %s", strings.Join(parseErrs, "\n"))
-	require.Equal(t, lenReconcileErrs, len(reconcileErrs), "reconcile errors: %s", strings.Join(reconcileErrs, "\n"))
-	require.Equal(t, lenResources, len(rs), "resources: %s", strings.Join(names, "\n"))
+	if lenParseErrs >= 0 {
+		require.Equal(t, lenParseErrs, len(parseErrs), "parse errors: %s", strings.Join(parseErrs, "\n"))
+	}
+	if lenReconcileErrs >= 0 {
+		require.Equal(t, lenReconcileErrs, len(reconcileErrs), "reconcile errors: %s", strings.Join(reconcileErrs, "\n"))
+	}
+	if lenResources >= 0 {
+		require.Equal(t, lenResources, len(rs), "resources: %s", strings.Join(names, "\n"))
+	}
+}
+
+func GetResource(t testing.TB, rt *runtime.Runtime, id, kind, name string) *runtimev1.Resource {
+	ctrl, err := rt.Controller(context.Background(), id)
+	require.NoError(t, err)
+
+	r, err := ctrl.Get(context.Background(), &runtimev1.ResourceName{Kind: kind, Name: name}, true)
+	require.NoError(t, err)
+
+	return r
 }
 
 func RequireResource(t testing.TB, rt *runtime.Runtime, id string, a *runtimev1.Resource) {
@@ -162,6 +181,21 @@ func RequireResource(t testing.TB, rt *runtime.Runtime, id string, a *runtimev1.
 		state := b.GetModel().State
 		state.RefreshedOn = nil
 		state.SpecHash = ""
+		state.RefsHash = ""
+	case runtime.ResourceKindAlert:
+		state := b.GetAlert().State
+		state.SpecHash = ""
+		state.RefsHash = ""
+		for i, e := range state.ExecutionHistory {
+			e.StartedOn = nil
+			e.FinishedOn = nil
+			if a.GetAlert().State.ExecutionHistory[i].ExecutionTime == nil {
+				e.ExecutionTime = nil
+			}
+		}
+	case runtime.ResourceKindConnector:
+		state := b.GetConnector().State
+		state.SpecHash = ""
 	}
 
 	// Hack to only compare the Resource field (not Meta)
@@ -177,7 +211,7 @@ func DumpResources(t testing.TB, rt *runtime.Runtime, id string) {
 	ctrl, err := rt.Controller(context.Background(), id)
 	require.NoError(t, err)
 
-	rs, err := ctrl.List(context.Background(), "", false)
+	rs, err := ctrl.List(context.Background(), "", "", false)
 	require.NoError(t, err)
 
 	for _, r := range rs {
@@ -196,7 +230,7 @@ func RequireParseErrors(t testing.TB, rt *runtime.Runtime, id string, expectedPa
 	for _, pe := range pp.GetProjectParser().State.ParseErrors {
 		parseErrs[pe.FilePath] = pe.Message
 	}
-	require.Len(t, parseErrs, len(expectedParseErrors))
+	require.Len(t, parseErrs, len(expectedParseErrors), "Should have %d parse errors", len(expectedParseErrors))
 
 	for f, pe := range parseErrs {
 		// Checking parseError using Contains instead of Equal

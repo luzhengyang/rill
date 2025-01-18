@@ -1,99 +1,96 @@
 <script lang="ts">
-  import Cancel from "@rilldata/web-common/components/icons/Cancel.svelte";
-  import EditIcon from "@rilldata/web-common/components/icons/EditIcon.svelte";
-  import Explore from "@rilldata/web-common/components/icons/Explore.svelte";
-  import { Divider, MenuItem } from "@rilldata/web-common/components/menu";
-  import { getFilePathFromNameAndType } from "@rilldata/web-common/features/entity-management/entity-mappers";
-  import { getFileHasErrors } from "@rilldata/web-common/features/entity-management/resources-store";
-  import { EntityType } from "@rilldata/web-common/features/entity-management/types";
-  import {
-    useCreateDashboardFromModelUIAction,
-    useModelSchemaIsReady,
-  } from "@rilldata/web-common/features/models/createDashboardFromModel";
+  import { fileArtifacts } from "@rilldata/web-common/features/entity-management/file-artifacts";
+  import { featureFlags } from "@rilldata/web-common/features/feature-flags";
+  import NavigationMenuItem from "@rilldata/web-common/layout/navigation/NavigationMenuItem.svelte";
   import { BehaviourEventMedium } from "@rilldata/web-common/metrics/service/BehaviourEventTypes";
   import { MetricsEventSpace } from "@rilldata/web-common/metrics/service/MetricsTypes";
   import { useQueryClient } from "@tanstack/svelte-query";
-  import { createEventDispatcher } from "svelte";
+  import { WandIcon } from "lucide-svelte";
+  import ExploreIcon from "../../../components/icons/ExploreIcon.svelte";
+  import MetricsViewIcon from "../../../components/icons/MetricsViewIcon.svelte";
+  import { V1ReconcileStatus } from "../../../runtime-client";
   import { runtime } from "../../../runtime-client/runtime-store";
-  import { deleteFileArtifact } from "../../entity-management/actions";
-  import { useModelFileNames } from "../selectors";
+  import { useCreateMetricsViewFromTableUIAction } from "../../metrics-views/ai-generation/generateMetricsView";
 
-  export let modelName: string;
-  // manually toggle menu to workaround: https://stackoverflow.com/questions/70662482/react-query-mutate-onsuccess-function-not-responding
-  export let toggleMenu: () => void;
-  $: modelPath = getFilePathFromNameAndType(modelName, EntityType.Model);
-
+  const { ai } = featureFlags;
   const queryClient = useQueryClient();
-  const dispatch = createEventDispatcher();
 
-  $: modelNames = useModelFileNames($runtime.instanceId);
-  $: modelHasError = getFileHasErrors(
-    queryClient,
-    $runtime.instanceId,
-    modelPath
-  );
-  $: modelSchemaIsReady = useModelSchemaIsReady(
-    queryClient,
-    $runtime.instanceId,
-    modelName
-  );
-  $: disableCreateDashboard = $modelHasError || !$modelSchemaIsReady;
+  export let filePath: string;
 
-  $: createDashboardFromModel = useCreateDashboardFromModelUIAction(
-    $runtime.instanceId,
-    modelName,
-    queryClient,
+  $: ({ instanceId } = $runtime);
+
+  $: fileArtifact = fileArtifacts.getFileArtifact(filePath);
+
+  $: modelHasError = fileArtifact.getHasErrors(queryClient, instanceId);
+  $: modelQuery = fileArtifact.getResource(queryClient, instanceId);
+  $: connector = $modelQuery.data?.model?.spec?.outputConnector;
+  $: modelIsIdle =
+    $modelQuery.data?.meta?.reconcileStatus ===
+    V1ReconcileStatus.RECONCILE_STATUS_IDLE;
+  $: disableCreateDashboard = $modelHasError || !modelIsIdle;
+  $: tableName = $modelQuery.data?.model?.state?.resultTable ?? "";
+
+  $: createMetricsViewFromTable = useCreateMetricsViewFromTableUIAction(
+    instanceId,
+    connector as string,
+    "",
+    "",
+    tableName,
+    false,
     BehaviourEventMedium.Menu,
-    MetricsEventSpace.LeftPanel
+    MetricsEventSpace.LeftPanel,
   );
 
-  async function createDashboardFromModelHandler() {
-    await createDashboardFromModel();
-    toggleMenu();
-  }
-
-  const handleDeleteModel = async (modelName: string) => {
-    await deleteFileArtifact(
-      $runtime.instanceId,
-      modelName,
-      EntityType.Model,
-      $modelNames.data
-    );
-    toggleMenu();
-  };
+  $: createExploreFromTable = useCreateMetricsViewFromTableUIAction(
+    instanceId,
+    connector as string,
+    "",
+    "",
+    tableName,
+    true,
+    BehaviourEventMedium.Menu,
+    MetricsEventSpace.LeftPanel,
+  );
 </script>
 
-<MenuItem
+<NavigationMenuItem
   disabled={disableCreateDashboard}
-  icon
-  on:select={() => createDashboardFromModelHandler()}
-  propogateSelect={false}
+  on:click={createMetricsViewFromTable}
 >
-  <Explore slot="icon" />
-  Autogenerate dashboard
+  <MetricsViewIcon slot="icon" />
+  <div class="flex gap-x-2 items-center">
+    Generate metrics
+    {#if $ai}
+      with AI
+      <WandIcon class="w-3 h-3" />
+    {/if}
+  </div>
   <svelte:fragment slot="description">
     {#if $modelHasError}
       Model has errors
-    {:else if !$modelSchemaIsReady}
+    {:else if !modelIsIdle}
       Dependencies are being reconciled.
     {/if}
   </svelte:fragment>
-</MenuItem>
-<Divider />
-<MenuItem
-  icon
-  on:select={() => {
-    dispatch("rename-asset");
-  }}
+</NavigationMenuItem>
+
+<NavigationMenuItem
+  disabled={disableCreateDashboard}
+  on:click={createExploreFromTable}
 >
-  <EditIcon slot="icon" />
-  Rename...
-</MenuItem>
-<MenuItem
-  icon
-  on:select={() => handleDeleteModel(modelName)}
-  propogateSelect={false}
->
-  <Cancel slot="icon" />
-  Delete
-</MenuItem>
+  <ExploreIcon slot="icon" />
+  <div class="flex gap-x-2 items-center">
+    Generate dashboard
+    {#if $ai}
+      with AI
+      <WandIcon class="w-3 h-3" />
+    {/if}
+  </div>
+  <svelte:fragment slot="description">
+    {#if $modelHasError}
+      Model has errors
+    {:else if !modelIsIdle}
+      Dependencies are being reconciled.
+    {/if}
+  </svelte:fragment>
+</NavigationMenuItem>

@@ -1,32 +1,29 @@
 <script lang="ts">
   import Cancel from "@rilldata/web-common/components/icons/Cancel.svelte";
   import Check from "@rilldata/web-common/components/icons/Check.svelte";
-  import Spacer from "@rilldata/web-common/components/icons/Spacer.svelte";
   import CheckCircle from "@rilldata/web-common/components/icons/CheckCircle.svelte";
-  import { CHECKMARK_COLORS } from "@rilldata/web-common/features/dashboards/config";
-
+  import Spacer from "@rilldata/web-common/components/icons/Spacer.svelte";
+  import {
+    COMPARIONS_COLORS,
+    SELECTED_NOT_COMPARED_COLOR,
+  } from "@rilldata/web-common/features/dashboards/config";
   import StickyHeader from "@rilldata/web-common/components/virtualized-table/core/StickyHeader.svelte";
+  import DimensionCompareMenu from "@rilldata/web-common/features/dashboards/leaderboard/DimensionCompareMenu.svelte";
   import { getContext } from "svelte";
   import type { VirtualizedTableConfig } from "../../../components/virtualized-table/types";
-  import DimensionCompareMenu from "@rilldata/web-common/features/dashboards/leaderboard/DimensionCompareMenu.svelte";
-  import { getStateManagers } from "../state-managers/state-managers";
 
   export let totalHeight: number;
   export let virtualRowItems;
   export let selectedIndex: number[] = [];
   export let excludeMode = false;
   export let isBeingCompared = false;
+  export let dimensionName: string;
+  export let toggleComparisonDimension: (dimensionName: string) => void;
 
-  const {
-    selectors: {
-      dimensions: { dimensionTableDimName },
-    },
-  } = getStateManagers();
-
-  function getColor(i) {
+  function getColor(i: number) {
     const posInSelection = selectedIndex.indexOf(i);
-    if (posInSelection >= 7) return "fill-gray-300";
-    return "fill-" + CHECKMARK_COLORS[posInSelection];
+    if (posInSelection >= 7) return SELECTED_NOT_COMPARED_COLOR;
+    return COMPARIONS_COLORS[posInSelection];
   }
 
   const config: VirtualizedTableConfig = getContext("config");
@@ -41,7 +38,11 @@
     style:height="{config.columnHeaderHeight}px"
     class="sticky left-0 top-0 surface z-40 flex items-center"
   >
-    <DimensionCompareMenu dimensionName={$dimensionTableDimName} />
+    <DimensionCompareMenu
+      {dimensionName}
+      {isBeingCompared}
+      {toggleComparisonDimension}
+    />
   </div>
   {#each virtualRowItems as row (`row-${row.key}`)}
     {@const isSelected = selectedIndex.includes(row.index)}
@@ -52,7 +53,7 @@
     >
       <div class="py-0.5 grid place-items-center">
         {#if isSelected && !excludeMode && isBeingCompared}
-          <CheckCircle className={getColor(row.index)} size="18px" />
+          <CheckCircle color={getColor(row.index)} size="18px" />
         {:else if isSelected && !excludeMode}
           <Check size="20px" />
         {:else if isSelected && excludeMode}

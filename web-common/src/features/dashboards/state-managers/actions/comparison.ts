@@ -1,21 +1,24 @@
-import { setDisplayComparison } from "../../stores/dashboard-stores";
 import type { DashboardMutables } from "./types";
 
-export const setComparisonDimension = (
+export const toggleComparisonDimension = (
   { dashboard }: DashboardMutables,
-  dimensionName: string | undefined
+  dimensionName: string,
 ) => {
-  if (dimensionName === undefined) {
-    setDisplayComparison(dashboard, true);
+  // Temporary until we make these not mutually exclusive
+  dashboard.showTimeComparison = false;
+  const isCurrentDimension =
+    dashboard.selectedComparisonDimension === dimensionName;
+
+  if (!isCurrentDimension) {
+    dashboard.selectedComparisonDimension = dimensionName;
   } else {
-    setDisplayComparison(dashboard, false);
+    dashboard.selectedComparisonDimension = undefined;
   }
-  dashboard.selectedComparisonDimension = dimensionName;
 };
 
 export const comparisonActions = {
   /**
    * Sets the comparison dimension for the dashboard.
    */
-  setComparisonDimension,
+  toggleComparisonDimension,
 };

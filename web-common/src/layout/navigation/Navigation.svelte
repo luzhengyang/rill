@@ -1,117 +1,228 @@
-<script lang="ts">
-  import Portal from "@rilldata/web-common/components/Portal.svelte";
-  import HideLeftSidebar from "@rilldata/web-common/components/icons/HideLeftSidebar.svelte";
-  import SurfaceViewIcon from "@rilldata/web-common/components/icons/SurfaceView.svelte";
-  import { featureFlags } from "@rilldata/web-common/features/feature-flags";
-  import { ModelAssets } from "@rilldata/web-common/features/models";
-  import ProjectTitle from "@rilldata/web-common/features/project/ProjectTitle.svelte";
-  import TableAssets from "@rilldata/web-common/features/sources/navigation/TableAssets.svelte";
-  import { getContext } from "svelte";
-  import { tweened } from "svelte/motion";
-  import { Readable, Writable, writable } from "svelte/store";
-  import DashboardAssets from "../../features/dashboards/DashboardAssets.svelte";
-  import OtherFiles from "../../features/project/OtherFiles.svelte";
-  import { DEFAULT_NAV_WIDTH } from "../config";
-  import { drag } from "../drag";
-  import Footer from "./Footer.svelte";
-  import SurfaceControlButton from "./SurfaceControlButton.svelte";
-
-  /** FIXME: come up with strong defaults here when needed */
-  const navigationLayout =
-    (getContext("rill:app:navigation-layout") as Writable<{
-      value: number;
-      visible: boolean;
-    }>) || writable({ value: DEFAULT_NAV_WIDTH, visible: true });
-
-  const navigationWidth =
-    (getContext("rill:app:navigation-width-tween") as Readable<number>) ||
-    writable(DEFAULT_NAV_WIDTH);
-
-  const navVisibilityTween =
-    (getContext("rill:app:navigation-visibility-tween") as Readable<number>) ||
-    tweened(0, { duration: 50 });
-
-  $: isModelerEnabled = $featureFlags.readOnly === false;
+<script lang="ts" context="module">
+  export const navigationOpen = (() => {
+    const { subscribe, update, set } = writable<boolean | null>(true);
+    return {
+      toggle: () => update((open) => !open),
+      set,
+      subscribe,
+    };
+  })();
 </script>
 
-<div
-  aria-hidden={!$navigationLayout?.visible}
-  class="box-border assets fixed"
-  style:left="{-$navVisibilityTween * $navigationWidth}px"
->
-  <div
-    class="
-  border-r
-  fixed
-  overflow-auto
-  border-gray-200
-  transition-colors
-  h-screen
-  bg-white
-"
-    class:hidden={$navVisibilityTween === 1}
-    class:pointer-events-none={!$navigationLayout?.visible}
-    style:top="0px"
-    style:width="{$navigationWidth}px"
-  >
-    <!-- draw handler -->
-    {#if $navigationLayout?.visible}
-      <Portal>
-        <div
-          role="separator"
-          on:dblclick={() => {
-            navigationLayout.update((state) => {
-              state.value = DEFAULT_NAV_WIDTH;
-              return state;
-            });
-          }}
-          class="fixed drawer-handler w-4 hover:cursor-col-resize -translate-x-2 h-screen"
-          style:left="{(1 - $navVisibilityTween) * $navigationWidth}px"
-          use:drag={{
-            minSize: DEFAULT_NAV_WIDTH,
-            maxSize: 440,
-            side: "assetsWidth",
-            store: navigationLayout,
-          }}
-        />
-      </Portal>
-    {/if}
+<script lang="ts">
+  import { fileArtifacts } from "@rilldata/web-common/features/entity-management/file-artifacts";
+  import { writable } from "svelte/store";
+  import ConnectorExplorer from "../../features/connectors/ConnectorExplorer.svelte";
+  import AddAssetButton from "../../features/entity-management/AddAssetButton.svelte";
+  import FileExplorer from "../../features/file-explorer/FileExplorer.svelte";
+  import Resizer from "../Resizer.svelte";
+  import { DEFAULT_NAV_WIDTH, MAX_NAV_WIDTH, MIN_NAV_WIDTH } from "../config";
+  import Footer from "./Footer.svelte";
+  import SurfaceControlButton from "./SurfaceControlButton.svelte";
+  import { connectorExplorerStore } from "@rilldata/web-common/features/connectors/connector-explorer-store";
+  import CaretDownIcon from "@rilldata/web-common/components/icons/CaretDownIcon.svelte";
 
-    <div class="w-full flex flex-col h-full">
-      <div class="grow">
-        <ProjectTitle />
-        {#if isModelerEnabled}
-          <TableAssets />
-          <ModelAssets />
-        {/if}
-        <DashboardAssets />
-        {#if isModelerEnabled}
-          <OtherFiles />
+  const DEFAULT_PERCENTAGE = 0.4;
+
+  let width = DEFAULT_NAV_WIDTH;
+  let previousWidth: number;
+  let resizing = false;
+  let resizingConnector = false;
+  let connectorHeightPercentage = DEFAULT_PERCENTAGE;
+  let contentRect = new DOMRectReadOnly(0, 0, 0, 0);
+  let connectorWrapper: HTMLDivElement;
+
+  $: navWrapperHeight = contentRect.height;
+
+  let showConnectors = true;
+
+  $: connectorSectionHeight = navWrapperHeight * connectorHeightPercentage;
+
+  $: ({ unsavedFiles } = fileArtifacts);
+  $: ({ size: unsavedFileCount } = $unsavedFiles);
+
+  function handleResize(
+    e: UIEvent & {
+      currentTarget: EventTarget & Window;
+    },
+  ) {
+    const currentWidth = e.currentTarget.innerWidth;
+
+    const open = $navigationOpen;
+
+    if (open && currentWidth < previousWidth && currentWidth < 768) {
+      $navigationOpen = null;
+    } else if (open === null && currentWidth > 768) {
+      $navigationOpen = true;
+    }
+
+    previousWidth = currentWidth;
+  }
+</script>
+
+<svelte:window
+  on:resize={handleResize}
+  on:keydown={(e) => {
+    const isMac = window.navigator.userAgent.includes("Macintosh");
+
+    if (e[isMac ? "metaKey" : "ctrlkey"] && e.key === "b") {
+      navigationOpen.toggle();
+    }
+  }}
+/>
+
+<nav
+  class="sidebar"
+  class:hide={!$navigationOpen}
+  class:resizing
+  style:width="{width}px"
+>
+  <Resizer
+    min={MIN_NAV_WIDTH}
+    basis={DEFAULT_NAV_WIDTH}
+    max={MAX_NAV_WIDTH}
+    dimension={width}
+    onUpdate={(w) => {
+      width = w;
+    }}
+    bind:resizing
+    side="right"
+  />
+  <div class="inner" style:width="{width}px">
+    <div class="p-2 w-full pr-10">
+      <AddAssetButton />
+    </div>
+    <div class="scroll-container">
+      <div class="nav-wrapper" bind:contentRect>
+        <section class="size-full overflow-y-auto pb-4">
+          <FileExplorer hasUnsaved={unsavedFileCount > 0} />
+        </section>
+
+        {#if navWrapperHeight}
+          <section class="connector-section">
+            {#if showConnectors}
+              <Resizer
+                dimension={connectorSectionHeight}
+                onUpdate={(height) => {
+                  connectorHeightPercentage = height / navWrapperHeight;
+                }}
+                direction="NS"
+                side="top"
+                min={0}
+                basis={navWrapperHeight * DEFAULT_PERCENTAGE}
+                max={navWrapperHeight * 0.9}
+                bind:resizing={resizingConnector}
+              />
+            {/if}
+
+            <button
+              on:click={() => {
+                const open = showConnectors;
+
+                if (!open) showConnectors = true;
+
+                connectorWrapper.animate(
+                  [
+                    {
+                      height: `${open ? connectorSectionHeight : 0}px`,
+                    },
+                    {
+                      height: `${open ? 0 : connectorSectionHeight}px`,
+                    },
+                  ],
+                  {
+                    duration: 200,
+                    easing: "ease-out",
+                  },
+                ).onfinish = () => {
+                  if (open) showConnectors = false;
+                };
+              }}
+            >
+              <CaretDownIcon
+                size="14px"
+                className="text-gray-400 transition-transform {!showConnectors &&
+                  '-rotate-90'}"
+              />
+              <h3>Connectors</h3>
+            </button>
+
+            <div
+              class="connector-wrapper"
+              bind:this={connectorWrapper}
+              style:height="{showConnectors ? connectorSectionHeight : 0}px"
+            >
+              {#if showConnectors}
+                <ConnectorExplorer store={connectorExplorerStore} />
+              {/if}
+            </div>
+          </section>
         {/if}
       </div>
-      <Footer />
     </div>
+    <Footer />
   </div>
-</div>
+</nav>
 
 <SurfaceControlButton
-  left="{($navigationWidth - 12 - 20) * (1 - $navVisibilityTween) +
-    12 * $navVisibilityTween}px"
-  on:click={() => {
-    //assetsVisible.set(!$assetsVisible);
-    navigationLayout.update((state) => {
-      state.visible = !state.visible;
-      return state;
-    });
-  }}
-  show={true}
->
-  {#if $navigationLayout?.visible}
-    <HideLeftSidebar size="18px" />
-  {:else}
-    <SurfaceViewIcon size="16px" mode={"hamburger"} />
-  {/if}
-  <svelte:fragment slot="tooltip-content">
-    {#if $navVisibilityTween === 0} Close {:else} Show {/if} sidebar
-  </svelte:fragment>
-</SurfaceControlButton>
+  {resizing}
+  navWidth={width}
+  navOpen={!!$navigationOpen}
+  onClick={navigationOpen.toggle}
+/>
+
+<style lang="postcss">
+  .sidebar {
+    @apply flex flex-col flex-none relative overflow-hidden;
+    @apply h-full border-r z-0;
+    @apply select-none;
+    transition-property: width;
+    will-change: width;
+  }
+
+  .inner {
+    @apply h-full overflow-hidden flex flex-col;
+    will-change: width;
+  }
+
+  .nav-wrapper {
+    @apply flex flex-col size-full;
+  }
+
+  .scroll-container {
+    @apply overflow-y-auto overflow-x-hidden;
+    @apply transition-colors h-full bg-white;
+  }
+
+  .sidebar:not(.resizing) {
+    transition-duration: 300ms;
+    transition-timing-function: ease-in-out;
+  }
+
+  .hide {
+    width: 0px !important;
+  }
+
+  .connector-section {
+    @apply flex flex-col flex-none h-fit;
+    @apply border-t border-t-gray-200 relative;
+  }
+
+  .connector-wrapper {
+    @apply overflow-y-auto;
+  }
+
+  button {
+    @apply flex gap-x-1 items-center w-full;
+    @apply pl-2 pr-3.5 py-1.5 cursor-pointer;
+    @apply text-gray-500;
+  }
+
+  button:hover {
+    @apply bg-slate-100;
+  }
+
+  h3 {
+    @apply font-semibold text-[10px] uppercase;
+  }
+</style>

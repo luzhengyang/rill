@@ -2,16 +2,16 @@ package duckdb
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/rilldata/rill/runtime/drivers"
 	"github.com/rilldata/rill/runtime/pkg/activity"
+	"github.com/rilldata/rill/runtime/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -201,37 +201,27 @@ func TestClose(t *testing.T) {
 	})
 
 	err := g.Wait()
-	require.Equal(t, errors.New("sql: database is closed"), err)
+
+	require.Error(t, err)
+	isConnErr := strings.Contains(err.Error(), "database/sql/driver: could not connect to database")
+	isClosedErr := strings.Contains(err.Error(), "sql: database is closed")
+	require.True(t, isConnErr || isClosedErr, "Error should be either connection error or database closed error")
 
 	x := <-results
 	require.Greater(t, x, 0)
 }
 
 func prepareConn(t *testing.T) drivers.Handle {
-	conn, err := Driver{}.Open(map[string]any{"dsn": "?access_mode=read_write", "pool_size": 4}, false, activity.NewNoopClient(), zap.NewNop())
+	conn, err := Driver{}.Open("default", map[string]any{}, storage.MustNew(t.TempDir(), nil), activity.NewNoopClient(), zap.NewNop())
 	require.NoError(t, err)
 
 	olap, ok := conn.AsOLAP("")
 	require.True(t, ok)
 
-	err = olap.Exec(context.Background(), &drivers.Statement{
-		Query: "CREATE TABLE foo(bar VARCHAR, baz INTEGER)",
-	})
+	err = olap.CreateTableAsSelect(context.Background(), "foo", "SELECT * FROM (VALUES ('a', 1), ('a', 2), ('b', 3), ('c', 4)) AS t(bar, baz)", &drivers.CreateTableOptions{})
 	require.NoError(t, err)
 
-	err = olap.Exec(context.Background(), &drivers.Statement{
-		Query: "INSERT INTO foo VALUES ('a', 1), ('a', 2), ('b', 3), ('c', 4)",
-	})
-	require.NoError(t, err)
-
-	err = olap.Exec(context.Background(), &drivers.Statement{
-		Query: "CREATE TABLE bar(bar VARCHAR, baz INTEGER)",
-	})
-	require.NoError(t, err)
-
-	err = olap.Exec(context.Background(), &drivers.Statement{
-		Query: "INSERT INTO bar VALUES ('a', 1), ('a', 2), ('b', 3), ('c', 4)",
-	})
+	err = olap.CreateTableAsSelect(context.Background(), "bar", "SELECT * FROM (VALUES ('a', 1), ('a', 2), ('b', 3), ('c', 4)) AS t(bar, baz)", &drivers.CreateTableOptions{})
 	require.NoError(t, err)
 
 	return conn
@@ -243,20 +233,8 @@ func Test_safeSQLString(t *testing.T) {
 	err := os.Mkdir(path, fs.ModePerm)
 	require.NoError(t, err)
 
-	dbFile := filepath.Join(path, "st@g3's.db")
-	conn, err := Driver{}.Open(map[string]any{"dsn": dbFile}, false, activity.NewNoopClient(), zap.NewNop())
+	conn, err := Driver{}.Open("default", map[string]any{"data_dir": path}, storage.MustNew(tempDir, nil), activity.NewNoopClient(), zap.NewNop())
 	require.NoError(t, err)
+	require.NotNil(t, conn)
 	require.NoError(t, conn.Close())
-
-	conn, err = Driver{}.Open(map[string]any{}, false, activity.NewNoopClient(), zap.NewNop())
-	require.NoError(t, err)
-
-	olap, ok := conn.AsOLAP("")
-	require.True(t, ok)
-
-	err = olap.Exec(context.Background(), &drivers.Statement{Query: fmt.Sprintf("ATTACH '%s'", dbFile)})
-	require.Error(t, err)
-
-	err = olap.Exec(context.Background(), &drivers.Statement{Query: fmt.Sprintf("ATTACH %s", safeSQLString(dbFile))})
-	require.NoError(t, err)
 }

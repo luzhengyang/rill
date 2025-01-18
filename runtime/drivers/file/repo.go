@@ -2,6 +2,8 @@ package file
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"io/fs"
@@ -14,16 +16,14 @@ import (
 	"github.com/rilldata/rill/runtime/drivers"
 )
 
-var limit = 500
-
 // Driver implements drivers.RepoStore.
 func (c *connection) Driver() string {
-	return "file"
+	return c.driverName
 }
 
 // Root implements drivers.RepoStore.
-func (c *connection) Root() string {
-	return c.root
+func (c *connection) Root(ctx context.Context) (string, error) {
+	return c.root, nil
 }
 
 // CommitHash implements drivers.RepoStore.
@@ -32,30 +32,36 @@ func (c *connection) CommitHash(ctx context.Context) (string, error) {
 }
 
 // ListRecursive implements drivers.RepoStore.
-func (c *connection) ListRecursive(ctx context.Context, glob string) ([]string, error) {
+func (c *connection) ListRecursive(ctx context.Context, glob string, skipDirs bool) ([]drivers.DirEntry, error) {
 	// Check that folder hasn't been moved
 	if err := c.checkRoot(); err != nil {
 		return nil, err
 	}
 
 	fsRoot := os.DirFS(c.root)
-	glob = filepath.Clean(filepath.Join("./", glob))
+	glob = filepath.Clean(filepath.Join(".", glob))
 
-	var paths []string
+	var entries []drivers.DirEntry
 	err := doublestar.GlobWalk(fsRoot, glob, func(p string, d fs.DirEntry) error {
-		// Don't track directories
-		if d.IsDir() {
+		if skipDirs && d.IsDir() {
 			return nil
 		}
 
 		// Exit if we reached the limit
-		if len(paths) == limit {
-			return fmt.Errorf("glob exceeded limit of %d matched files", limit)
+		if len(entries) == drivers.RepoListLimit {
+			return drivers.ErrRepoListLimitExceeded
 		}
 
 		// Track file (p is already relative to the FS root)
-		p = filepath.Join("/", p)
-		paths = append(paths, p)
+		p = filepath.Join(string(filepath.Separator), p)
+		// Do not send files for ignored paths
+		if drivers.IsIgnored(p, c.ignorePaths) {
+			return nil
+		}
+		entries = append(entries, drivers.DirEntry{
+			Path:  p,
+			IsDir: d.IsDir(),
+		})
 
 		return nil
 	})
@@ -63,15 +69,19 @@ func (c *connection) ListRecursive(ctx context.Context, glob string) ([]string, 
 		return nil, err
 	}
 
-	return paths, nil
+	return entries, nil
 }
 
 // Get implements drivers.RepoStore.
 func (c *connection) Get(ctx context.Context, filePath string) (string, error) {
-	filePath = filepath.Join(c.root, filePath)
+	fp := filepath.Join(c.root, filePath)
 
-	b, err := os.ReadFile(filePath)
+	b, err := os.ReadFile(fp)
 	if err != nil {
+		// obscure the root directory location
+		if t, ok := err.(*fs.PathError); ok { // nolint:errorlint // we specifically check for a non-wrapped error
+			return "", fmt.Errorf("%s %s %s", t.Op, filePath, t.Err.Error())
+		}
 		return "", err
 	}
 
@@ -89,7 +99,29 @@ func (c *connection) Stat(ctx context.Context, filePath string) (*drivers.RepoOb
 
 	return &drivers.RepoObjectStat{
 		LastUpdated: info.ModTime(),
+		IsDir:       info.IsDir(),
 	}, nil
+}
+
+func (c *connection) FileHash(ctx context.Context, paths []string) (string, error) {
+	hasher := md5.New()
+	for _, path := range paths {
+		path = filepath.Join(c.root, path)
+		file, err := os.Open(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return "", err
+		}
+
+		if _, err := io.Copy(hasher, file); err != nil {
+			file.Close()
+			return "", err
+		}
+		file.Close()
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 // Put implements drivers.RepoStore.
@@ -115,6 +147,17 @@ func (c *connection) Put(ctx context.Context, filePath string, reader io.Reader)
 	return nil
 }
 
+func (c *connection) MakeDir(ctx context.Context, dirPath string) error {
+	dirPath = filepath.Join(c.root, dirPath)
+
+	err := os.MkdirAll(dirPath, os.ModePerm)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // Rename implements drivers.RepoStore.
 func (c *connection) Rename(ctx context.Context, fromPath, toPath string) error {
 	toPath = filepath.Join(c.root, toPath)
@@ -131,8 +174,11 @@ func (c *connection) Rename(ctx context.Context, fromPath, toPath string) error 
 }
 
 // Delete implements drivers.RepoStore.
-func (c *connection) Delete(ctx context.Context, filePath string) error {
+func (c *connection) Delete(ctx context.Context, filePath string, force bool) error {
 	filePath = filepath.Join(c.root, filePath)
+	if force {
+		return os.RemoveAll(filePath)
+	}
 	return os.Remove(filePath)
 }
 
@@ -145,7 +191,7 @@ func (c *connection) Sync(ctx context.Context) error {
 func (c *connection) Watch(ctx context.Context, cb drivers.WatchCallback) error {
 	c.watcherMu.Lock()
 	if c.watcher == nil {
-		w, err := newWatcher(c.root)
+		w, err := newWatcher(c.root, c.ignorePaths, c.logger)
 		if err != nil {
 			c.watcherMu.Unlock()
 			return err

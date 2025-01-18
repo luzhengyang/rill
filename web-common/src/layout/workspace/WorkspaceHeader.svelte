@@ -1,131 +1,137 @@
 <script lang="ts">
-  import { page } from "$app/stores";
-  import { IconButton } from "@rilldata/web-common/components/button";
-  import HideRightSidebar from "@rilldata/web-common/components/icons/HideRightSidebar.svelte";
+  import HideSidebar from "@rilldata/web-common/components/icons/HideSidebar.svelte";
   import SlidingWords from "@rilldata/web-common/components/tooltip/SlidingWords.svelte";
+  import { workspaces } from "./workspace-stores";
+  import { navigationOpen } from "../navigation/Navigation.svelte";
+  import HideBottomPane from "@rilldata/web-common/components/icons/HideBottomPane.svelte";
+  import Button from "@rilldata/web-common/components/button/Button.svelte";
+  import {
+    resourceColorMapping,
+    resourceIconMapping,
+  } from "@rilldata/web-common/features/entity-management/resource-icon-mapping";
+  import InputWithConfirm from "@rilldata/web-common/components/forms/InputWithConfirm.svelte";
   import Tooltip from "@rilldata/web-common/components/tooltip/Tooltip.svelte";
   import TooltipContent from "@rilldata/web-common/components/tooltip/TooltipContent.svelte";
-  import { createResizeListenerActionFactory } from "@rilldata/web-common/lib/actions/create-resize-listener-factory";
-  import { dynamicTextInputWidth } from "@rilldata/web-common/lib/actions/dynamic-text-input-width";
-  import { getContext } from "svelte";
-  import type { Tweened } from "svelte/motion";
-  import type { Writable } from "svelte/store";
-  import SourceUnsavedIndicator from "../../features/sources/editor/SourceUnsavedIndicator.svelte";
-  import type { LayoutElement } from "./types";
+  import type { ResourceKind } from "@rilldata/web-common/features/entity-management/resource-selectors";
+  import { Settings } from "lucide-svelte";
+  import File from "@rilldata/web-common/components/icons/File.svelte";
+  import WorkspaceBreadcrumbs from "@rilldata/web-common/features/workspaces/WorkspaceBreadcrumbs.svelte";
+  import type { V1Resource } from "@rilldata/web-common/runtime-client";
 
-  export let onChangeCallback;
-  export let titleInput;
+  export let resourceKind: ResourceKind | undefined;
+  export let titleInput: string;
   export let editable = true;
   export let showInspectorToggle = true;
+  export let showTableToggle = false;
+  export let hasUnsavedChanges: boolean;
+  export let filePath: string;
+  export let resource: V1Resource | undefined = undefined;
+  export let onTitleChange: (title: string) => void = () => {};
 
-  let titleInputElement;
-  let editingTitle = false;
+  let width: number;
+  let editing = false;
 
-  let tooltipActive;
-
-  const { listenToNodeResize, observedNode } =
-    createResizeListenerActionFactory();
-
-  const inspectorLayout = getContext(
-    "rill:app:inspector-layout"
-  ) as Writable<LayoutElement>;
-
-  const navigationVisibilityTween = getContext(
-    "rill:app:navigation-visibility-tween"
-  ) as Tweened<number>;
-
-  function onKeydown(event) {
-    if (editingTitle && event.key === "Enter") {
-      titleInputElement.blur();
-    }
-  }
-
-  $: width = $observedNode?.getBoundingClientRect()?.width;
-
-  function onInput() {
-    if (editable) {
-      editingTitle = true;
-    }
-  }
+  $: value = titleInput;
+  $: workspaceLayout = workspaces.get(filePath);
+  $: inspectorVisible = workspaceLayout.inspector.visible;
+  $: tableVisible = workspaceLayout.table.visible;
 </script>
 
-<svelte:window on:keydown={onKeydown} />
-<header
-  class="grid items-center content-stretch justify-between pl-4 border-b border-gray-300"
-  style:grid-template-columns="[title] minmax(0, 1fr) [controls] auto"
-  style:height="var(--header-height)"
-  use:listenToNodeResize
->
-  <div style:padding-left="{$navigationVisibilityTween * 24}px">
-    {#if titleInput !== undefined && titleInput !== null}
-      <h1
-        style:font-size="16px"
-        class="grid grid-flow-col justify-start items-center gap-x-1 overflow-hidden"
-      >
-        <Tooltip
-          distance={8}
-          alignment="start"
-          bind:active={tooltipActive}
-          suppress={editingTitle || !editable}
-        >
-          <input
-            autocomplete="off"
-            disabled={!editable}
-            id="model-title-input"
-            bind:this={titleInputElement}
-            on:focus={() => {
-              editingTitle = true;
-            }}
-            on:input={onInput}
-            class="bg-transparent border border-transparent border-2 {editable
-              ? 'hover:border-gray-400 cursor-pointer'
-              : ''} rounded pl-2 pr-2"
-            class:font-bold={editingTitle === false}
-            on:blur={() => {
-              editingTitle = false;
-            }}
-            value={titleInput}
-            use:dynamicTextInputWidth
-            on:change={onChangeCallback}
-          />
-          <TooltipContent slot="tooltip-content">
-            <div class="flex items-center gap-x-2">Edit</div>
-          </TooltipContent>
-        </Tooltip>
-
-        {#if $page.url.pathname.startsWith("/source")}
-          <SourceUnsavedIndicator sourceName={titleInput} />
-        {/if}
-      </h1>
-    {/if}
+<header bind:clientWidth={width}>
+  <div
+    class="slide pl-3.5 h-7 flex items-center"
+    class:!pl-10={!$navigationOpen}
+  >
+    <WorkspaceBreadcrumbs {resource} {filePath} />
   </div>
 
-  <div class="flex items-center mr-4">
-    <slot name="workspace-controls" {width} />
-    {#if showInspectorToggle}
-      <IconButton
-        on:click={() => {
-          inspectorLayout.update((state) => {
-            state.visible = !state.visible;
-            return state;
-          });
-        }}
-      >
-        <span class="text-gray-500">
-          <HideRightSidebar size="18px" />
-        </span>
-        <svelte:fragment slot="tooltip-content">
-          <SlidingWords
-            active={$inspectorLayout?.visible}
-            direction="horizontal"
-            reverse>inspector</SlidingWords
-          >
-        </svelte:fragment>
-      </IconButton>
-    {/if}
+  <div class="second-level-wrapper">
+    <div class="flex gap-x-1 items-center w-full" class:truncate={!editing}>
+      <span class="flex-none">
+        <svelte:component
+          this={resourceKind
+            ? resourceIconMapping[resourceKind]
+            : filePath === "/.env" || filePath === "/rill.yaml"
+              ? Settings
+              : File}
+          size="19px"
+          color={resourceKind ? resourceColorMapping[resourceKind] : "#9CA3AF"}
+        />
+      </span>
 
-    <div class="pl-4">
-      <slot name="cta" {width} />
+      <InputWithConfirm
+        bind:editing
+        size="md"
+        {editable}
+        id="model-title-input"
+        textClass="text-xl font-semibold"
+        {value}
+        onConfirm={onTitleChange}
+        showIndicator={hasUnsavedChanges}
+      />
+    </div>
+
+    <div class="flex items-center gap-x-2 w-fit flex-none">
+      <slot name="workspace-controls" {width} />
+
+      <div class="flex-none">
+        <slot name="cta" {width} />
+      </div>
+
+      {#if showTableToggle}
+        <Tooltip distance={8}>
+          <Button
+            type="secondary"
+            square
+            selected={$tableVisible}
+            label="Toggle table visibility"
+            on:click={workspaceLayout.table.toggle}
+          >
+            <HideBottomPane size="18px" open={$tableVisible} />
+          </Button>
+          <TooltipContent slot="tooltip-content">
+            <SlidingWords active={$tableVisible} reverse>
+              results preview
+            </SlidingWords>
+          </TooltipContent>
+        </Tooltip>
+      {/if}
+
+      {#if showInspectorToggle}
+        <Tooltip distance={8}>
+          <Button
+            type="secondary"
+            square
+            selected={$inspectorVisible}
+            label="Toggle inspector visibility"
+            on:click={workspaceLayout.inspector.toggle}
+          >
+            <HideSidebar open={$inspectorVisible} size="18px" />
+          </Button>
+
+          <TooltipContent slot="tooltip-content">
+            <SlidingWords
+              active={$inspectorVisible}
+              direction="horizontal"
+              reverse
+            >
+              inspector
+            </SlidingWords>
+          </TooltipContent>
+        </Tooltip>
+      {/if}
     </div>
   </div>
 </header>
+
+<style lang="postcss">
+  .second-level-wrapper {
+    @apply px-4 py-2 w-full h-7;
+    @apply flex justify-between gap-x-2;
+    @apply items-center;
+  }
+
+  header {
+    @apply flex flex-col py-2 gap-y-2;
+  }
+</style>

@@ -10,9 +10,12 @@ import (
 )
 
 type RollupInterval struct {
-	TableName  string
-	ColumnName string
-	Result     *runtimev1.ColumnRollupIntervalResponse
+	Connector      string
+	Database       string
+	DatabaseSchema string
+	TableName      string
+	ColumnName     string
+	Result         *runtimev1.ColumnRollupIntervalResponse
 }
 
 var _ runtime.Query = &RollupInterval{}
@@ -46,18 +49,28 @@ func (q *RollupInterval) UnmarshalResult(v any) error {
 
 func (q *RollupInterval) Resolve(ctx context.Context, rt *runtime.Runtime, instanceID string, priority int) error {
 	ctr := &ColumnTimeRange{
-		TableName:  q.TableName,
-		ColumnName: q.ColumnName,
+		Connector:      q.Connector,
+		Database:       q.Database,
+		DatabaseSchema: q.DatabaseSchema,
+		TableName:      q.TableName,
+		ColumnName:     q.ColumnName,
 	}
 	err := rt.Query(ctx, instanceID, ctr, priority)
 	if err != nil {
 		return err
 	}
-	if ctr.Result.Interval == nil {
+
+	if !ctr.Result.Min.IsValid() {
 		q.Result = &runtimev1.ColumnRollupIntervalResponse{}
 		return nil
 	}
-	r := ctr.Result.Interval
+	duration := ctr.Result.Max.AsTime().Sub(ctr.Result.Min.AsTime())
+	hours := duration.Hours()
+	days := int64(0)
+	if hours >= hourInDay {
+		days = int64(hours / hourInDay)
+	}
+	micros := duration.Microseconds() - microsInDay*days
 
 	const (
 		microsSecond = 1000 * 1000
@@ -67,17 +80,17 @@ func (q *RollupInterval) Resolve(ctx context.Context, rt *runtime.Runtime, insta
 	)
 
 	var rollupInterval runtimev1.TimeGrain
-	if r.Days == 0 && r.Micros <= microsMinute {
+	if days == 0 && micros <= microsMinute {
 		rollupInterval = runtimev1.TimeGrain_TIME_GRAIN_MILLISECOND
-	} else if r.Days == 0 && r.Micros > microsMinute && r.Micros <= microsHour {
+	} else if days == 0 && micros > microsMinute && micros <= microsHour {
 		rollupInterval = runtimev1.TimeGrain_TIME_GRAIN_SECOND
-	} else if r.Days == 0 && r.Micros <= microsDay {
+	} else if days == 0 && micros <= microsDay {
 		rollupInterval = runtimev1.TimeGrain_TIME_GRAIN_MINUTE
-	} else if r.Days <= 7 {
+	} else if days <= 7 {
 		rollupInterval = runtimev1.TimeGrain_TIME_GRAIN_HOUR
-	} else if r.Days <= 365*20 {
+	} else if days <= 365*20 {
 		rollupInterval = runtimev1.TimeGrain_TIME_GRAIN_DAY
-	} else if r.Days <= 365*500 {
+	} else if days <= 365*500 {
 		rollupInterval = runtimev1.TimeGrain_TIME_GRAIN_MONTH
 	} else {
 		rollupInterval = runtimev1.TimeGrain_TIME_GRAIN_YEAR

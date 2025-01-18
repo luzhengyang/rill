@@ -1,148 +1,368 @@
 <script lang="ts">
-  /**
-   * Leaderboard.svelte
-   * -------------------------
-   * This is the "implemented" feature of the leaderboard, meant to be used
-   * in the application itself.
-   */
   import Tooltip from "@rilldata/web-common/components/tooltip/Tooltip.svelte";
   import TooltipContent from "@rilldata/web-common/components/tooltip/TooltipContent.svelte";
-  import { getStateManagers } from "@rilldata/web-common/features/dashboards/state-managers/state-managers";
-  import {
-    createQueryServiceMetricsViewComparison,
-    createQueryServiceMetricsViewTotals,
+  import { DashboardState_LeaderboardSortType } from "@rilldata/web-common/proto/gen/rill/ui/v1/dashboard_pb";
+  import type {
+    MetricsViewSpecDimensionV2,
+    V1Expression,
+    V1MetricsViewAggregationMeasure,
+    V1MetricsViewSpec,
+    V1TimeRange,
   } from "@rilldata/web-common/runtime-client";
-
-  import LeaderboardHeader from "./LeaderboardHeader.svelte";
-  import LeaderboardListItem from "./LeaderboardListItem.svelte";
   import {
-    LeaderboardItemData,
-    getLabeledComparisonFromComparisonRow,
+    createQueryServiceMetricsViewAggregation,
+    V1Operation,
+  } from "@rilldata/web-common/runtime-client";
+  import { onMount } from "svelte";
+  import {
+    cleanUpComparisonValue,
+    compareLeaderboardValues,
+    getSort,
     prepareLeaderboardItemData,
   } from "./leaderboard-utils";
+  import type { DimensionThresholdFilter } from "../stores/metrics-explorer-entity";
+  import { SortType } from "../proto-state/derived-types";
+  import {
+    createAndExpression,
+    createOrExpression,
+    isExpressionUnsupported,
+    sanitiseExpression,
+  } from "../stores/filter-utils";
+  import {
+    getComparisonRequestMeasures,
+    getURIRequestMeasure,
+  } from "../dashboard-utils";
+  import { mergeDimensionAndMeasureFilter } from "../filters/measure-filters/measure-filter-utils";
+  import {
+    additionalMeasures,
+    getFiltersForOtherDimensions,
+  } from "../selectors";
+  import { getIndependentMeasures } from "../state-managers/selectors/measures";
+  import LeaderboardHeader from "./LeaderboardHeader.svelte";
+  import LeaderboardRow from "./LeaderboardRow.svelte";
+  import LoadingRows from "./LoadingRows.svelte";
+  import {
+    valueColumn,
+    deltaColumn,
+    DEFAULT_COL_WIDTH,
+  } from "./leaderboard-widths";
 
-  export let dimensionName: string;
-  /** The reference value is the one that the bar in the LeaderboardListItem
-   * gets scaled with. For a summable metric, the total is a reference value,
-   * or for a count(*) metric, the reference value is the total number of rows.
-   */
+  const slice = 7;
+  const gutterWidth = 24;
+  const queryLimit = 8;
 
-  let slice = 7;
+  export let dimension: MetricsViewSpecDimensionV2;
+  export let timeRange: V1TimeRange;
+  export let comparisonTimeRange: V1TimeRange | undefined;
+  export let selectedValues: string[];
+  export let instanceId: string;
+  export let whereFilter: V1Expression;
+  export let dimensionThresholdFilters: DimensionThresholdFilter[];
+  export let activeMeasureName: string;
+  export let metricsViewName: string;
+  export let metricsView: V1MetricsViewSpec;
+  export let sortType: SortType;
+  export let tableWidth: number;
+  export let sortedAscending: boolean;
+  export let isValidPercentOfTotal: boolean;
+  export let timeControlsReady: boolean;
+  export let firstColumnWidth: number;
+  export let isSummableMeasure: boolean;
+  export let filterExcludeMode: boolean;
+  export let atLeastOneActive: boolean;
+  export let isBeingCompared: boolean;
+  export let parentElement: HTMLElement;
+  export let toggleDimensionValueSelection: (
+    dimensionName: string,
+    dimensionValue: string,
+    keepPillVisible?: boolean | undefined,
+    isExclusiveFilter?: boolean | undefined,
+  ) => void;
+  export let formatter:
+    | ((_value: number | undefined) => undefined)
+    | ((value: string | number) => string);
+  export let setPrimaryDimension: (dimensionName: string) => void;
+  export let toggleSort: (sortType: DashboardState_LeaderboardSortType) => void;
+  export let toggleComparisonDimension: (
+    dimensionName: string | undefined,
+  ) => void;
 
-  const {
-    selectors: {
-      activeMeasure: { activeMeasureName },
-      dimensionFilters: { selectedDimensionValues },
-      dashboardQueries: {
-        leaderboardSortedQueryBody,
-        leaderboardSortedQueryOptions,
-        leaderboardDimensionTotalQueryBody,
-        leaderboardDimensionTotalQueryOptions,
+  const observer = new IntersectionObserver(
+    ([entry]) => {
+      visible = entry.isIntersecting;
+    },
+    {
+      root: parentElement,
+      rootMargin: "120px",
+      threshold: 0,
+    },
+  );
+
+  onMount(() => {
+    observer.observe(container);
+  });
+
+  let container: HTMLElement;
+  let visible = false;
+  let hovered: boolean;
+
+  $: ({
+    name: dimensionName = "",
+    description = "",
+    displayName = "",
+    uri,
+  } = dimension);
+
+  $: isComplexFilter = isExpressionUnsupported(whereFilter);
+  $: where = isComplexFilter
+    ? whereFilter
+    : sanitiseExpression(
+        mergeDimensionAndMeasureFilter(
+          getFiltersForOtherDimensions(whereFilter, dimensionName),
+          dimensionThresholdFilters,
+        ),
+        undefined,
+      );
+
+  $: measures = getIndependentMeasures(
+    metricsView,
+    additionalMeasures(activeMeasureName, dimensionThresholdFilters),
+  )
+    .map(
+      (n) =>
+        ({
+          name: n,
+        }) as V1MetricsViewAggregationMeasure,
+    )
+    .concat(
+      ...(comparisonTimeRange
+        ? getComparisonRequestMeasures(activeMeasureName)
+        : []),
+    )
+    .concat(uri ? [getURIRequestMeasure(dimensionName)] : []);
+
+  $: sort = getSort(
+    sortedAscending,
+    sortType,
+    activeMeasureName,
+    dimensionName,
+    !!comparisonTimeRange,
+  );
+
+  $: sortedQuery = createQueryServiceMetricsViewAggregation(
+    instanceId,
+    metricsViewName,
+    {
+      dimensions: [{ name: dimensionName }],
+      measures,
+      timeRange,
+      comparisonTimeRange,
+      sort,
+      where,
+      limit: queryLimit.toString(),
+      offset: "0",
+    },
+    {
+      query: {
+        enabled: visible && timeControlsReady,
       },
     },
-    actions: {
-      dimensions: { setPrimaryDimension },
-    },
+  );
+
+  $: totalsQuery = createQueryServiceMetricsViewAggregation(
+    instanceId,
     metricsViewName,
-    runtime,
-  } = getStateManagers();
-
-  $: sortedQuery = createQueryServiceMetricsViewComparison(
-    $runtime.instanceId,
-    $metricsViewName,
-    $leaderboardSortedQueryBody(dimensionName),
-    $leaderboardSortedQueryOptions(dimensionName)
+    {
+      measures: [{ name: activeMeasureName }],
+      where,
+      timeStart: timeRange.start,
+      timeEnd: timeRange.end,
+    },
+    {
+      query: {
+        enabled: timeControlsReady && visible,
+      },
+    },
   );
 
-  $: totalsQuery = createQueryServiceMetricsViewTotals(
-    $runtime.instanceId,
-    $metricsViewName,
-    $leaderboardDimensionTotalQueryBody(dimensionName),
-    $leaderboardDimensionTotalQueryOptions(dimensionName)
-  );
+  $: ({ data: sortedData, isFetching } = $sortedQuery);
+  $: ({ data: totalsData } = $totalsQuery);
 
-  $: leaderboardTotal = $totalsQuery?.data?.data?.[$activeMeasureName];
+  $: leaderboardTotal = totalsData?.data?.[0]?.[activeMeasureName] as
+    | number
+    | null;
 
-  let aboveTheFold: LeaderboardItemData[] = [];
-  let selectedBelowTheFold: LeaderboardItemData[] = [];
-  let noAvailableValues = true;
-  let showExpandTable = false;
-  $: if (sortedQuery && !$sortedQuery?.isFetching) {
-    const leaderboardData = prepareLeaderboardItemData(
-      $sortedQuery?.data?.rows?.map((r) =>
-        getLabeledComparisonFromComparisonRow(r, $activeMeasureName)
-      ) ?? [],
+  $: ({ aboveTheFold, belowTheFoldValues, noAvailableValues, showExpandTable } =
+    prepareLeaderboardItemData(
+      sortedData?.data,
+      dimensionName,
+      activeMeasureName,
       slice,
-      $selectedDimensionValues(dimensionName),
-      leaderboardTotal
-    );
+      selectedValues,
+      leaderboardTotal,
+    ));
 
-    aboveTheFold = leaderboardData.aboveTheFold;
-    selectedBelowTheFold = leaderboardData.selectedBelowTheFold;
-    noAvailableValues = leaderboardData.noAvailableValues;
-    showExpandTable = leaderboardData.showExpandTable;
-  }
+  $: belowTheFoldDataQuery = createQueryServiceMetricsViewAggregation(
+    instanceId,
+    metricsViewName,
+    {
+      dimensions: [{ name: dimensionName }],
+      where: sanitiseExpression(
+        createAndExpression(
+          [
+            createOrExpression(
+              belowTheFoldValues.map((dimensionValue) => ({
+                cond: {
+                  op: V1Operation.OPERATION_EQ,
+                  exprs: [{ ident: dimensionName }, { val: dimensionValue }],
+                },
+              })),
+            ),
+          ].concat(where ?? []),
+        ),
+        undefined,
+      ),
+      sort,
+      timeRange,
+      comparisonTimeRange,
+      measures,
+    },
+    {
+      query: {
+        enabled: !!belowTheFoldValues.length && timeControlsReady && visible,
+      },
+    },
+  );
 
-  let hovered: boolean;
+  $: ({ data } = $belowTheFoldDataQuery);
+
+  $: belowTheFoldData = data?.data?.length
+    ? data?.data
+    : belowTheFoldValues.map((value) => ({
+        [dimensionName]: value,
+        [activeMeasureName]: null,
+      }));
+
+  $: belowTheFoldRows = belowTheFoldData.map((item) =>
+    cleanUpComparisonValue(
+      item,
+      dimensionName,
+      activeMeasureName,
+      leaderboardTotal,
+      selectedValues.findIndex((value) =>
+        compareLeaderboardValues(value, item[dimensionName]),
+      ),
+    ),
+  );
+
+  $: columnCount = comparisonTimeRange ? 3 : isValidPercentOfTotal ? 2 : 1;
 </script>
 
-{#if $sortedQuery !== undefined}
-  <div
-    role="grid"
-    tabindex="0"
-    style:width="315px"
-    on:mouseenter={() => (hovered = true)}
-    on:mouseleave={() => (hovered = false)}
-  >
-    <LeaderboardHeader
-      isFetching={$sortedQuery.isFetching}
-      {dimensionName}
-      {hovered}
-    />
-    {#if aboveTheFold || selectedBelowTheFold}
-      <div class="rounded-b border-gray-200 surface text-gray-800">
-        <!-- place the leaderboard entries that are above the fold here -->
-        {#each aboveTheFold as itemData (itemData.dimensionValue)}
-          <LeaderboardListItem {dimensionName} {itemData} on:click on:keydown />
-        {/each}
-        <!-- place the selected values that are not above the fold here -->
-        {#if selectedBelowTheFold?.length}
-          <hr />
-          {#each selectedBelowTheFold as itemData (itemData.dimensionValue)}
-            <LeaderboardListItem
-              {dimensionName}
-              {itemData}
-              on:click
-              on:keydown
-            />
-          {/each}
+<div
+  class="flex flex-col"
+  aria-label="{dimensionName} leaderboard"
+  role="table"
+  bind:this={container}
+  on:mouseenter={() => (hovered = true)}
+  on:mouseleave={() => (hovered = false)}
+>
+  <table style:width="{tableWidth + gutterWidth}px">
+    <colgroup>
+      <col style:width="{gutterWidth}px" />
+      <col style:width="{firstColumnWidth}px" />
+      <col style:width="{$valueColumn}px" />
+      {#if !!comparisonTimeRange}
+        <col style:width="{$deltaColumn}px" />
+        <col style:width="{DEFAULT_COL_WIDTH}px" />
+      {:else if isValidPercentOfTotal}
+        <col style:width="{DEFAULT_COL_WIDTH}px" />
+      {/if}
+    </colgroup>
 
-          <hr />
-        {/if}
-        {#if $sortedQuery?.isError}
-          <div class="text-red-500">
-            {JSON.stringify($sortedQuery?.error)}
-          </div>
-        {:else if noAvailableValues}
-          <div style:padding-left="30px" class="p-1 ui-copy-disabled">
-            no available values
-          </div>
-        {/if}
-        {#if showExpandTable}
-          <Tooltip location="right">
-            <button
-              on:click={() => setPrimaryDimension(dimensionName)}
-              class="block flex-row w-full text-left transition-color ui-copy-muted"
-              style:padding-left="30px"
-            >
-              (Expand Table)
-            </button>
-            <TooltipContent slot="tooltip-content"
-              >Expand dimension to see more values</TooltipContent
-            >
-          </Tooltip>
-        {/if}
-      </div>
-    {/if}
-  </div>
-{/if}
+    <LeaderboardHeader
+      {hovered}
+      displayName={displayName || dimensionName}
+      dimensionDescription={description}
+      {dimensionName}
+      {isBeingCompared}
+      {isFetching}
+      {sortType}
+      {isValidPercentOfTotal}
+      {sortedAscending}
+      isTimeComparisonActive={!!comparisonTimeRange}
+      {toggleSort}
+      {setPrimaryDimension}
+      {toggleComparisonDimension}
+    />
+
+    <tbody>
+      {#if isFetching}
+        <LoadingRows columns={columnCount + 1} />
+      {:else}
+        {#each aboveTheFold as itemData (itemData.dimensionValue)}
+          <LeaderboardRow
+            {tableWidth}
+            {firstColumnWidth}
+            {isSummableMeasure}
+            {isBeingCompared}
+            {filterExcludeMode}
+            {atLeastOneActive}
+            {dimensionName}
+            {itemData}
+            {isValidPercentOfTotal}
+            isTimeComparisonActive={!!comparisonTimeRange}
+            {toggleDimensionValueSelection}
+            {formatter}
+          />
+        {/each}
+      {/if}
+
+      {#each belowTheFoldRows as itemData, i (itemData.dimensionValue)}
+        <LeaderboardRow
+          {itemData}
+          {firstColumnWidth}
+          {isSummableMeasure}
+          {tableWidth}
+          {dimensionName}
+          {isBeingCompared}
+          {filterExcludeMode}
+          {atLeastOneActive}
+          {isValidPercentOfTotal}
+          isTimeComparisonActive={!!comparisonTimeRange}
+          borderTop={i === 0}
+          borderBottom={i === belowTheFoldRows.length - 1}
+          {toggleDimensionValueSelection}
+          {formatter}
+        />
+      {/each}
+    </tbody>
+  </table>
+
+  {#if showExpandTable}
+    <Tooltip location="right">
+      <button
+        class="transition-color ui-copy-muted table-message"
+        on:click={() => setPrimaryDimension(dimensionName)}
+      >
+        (Expand Table)
+      </button>
+      <TooltipContent slot="tooltip-content">
+        Expand dimension to see more values
+      </TooltipContent>
+    </Tooltip>
+  {:else if noAvailableValues}
+    <div class="table-message ui-copy-muted">(No available values)</div>
+  {/if}
+</div>
+
+<style lang="postcss">
+  table {
+    @apply p-0 m-0 border-spacing-0 border-collapse w-fit;
+    @apply font-normal cursor-pointer select-none;
+    @apply table-fixed;
+  }
+
+  .table-message {
+    @apply h-[22px] p-1 flex-row w-full text-left pl-7;
+  }
+</style>

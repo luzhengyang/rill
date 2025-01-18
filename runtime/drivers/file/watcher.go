@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -13,7 +14,9 @@ import (
 	"github.com/fsnotify/fsnotify"
 	runtimev1 "github.com/rilldata/rill/proto/gen/rill/runtime/v1"
 	"github.com/rilldata/rill/runtime/drivers"
+	"go.uber.org/zap"
 	"golang.org/x/exp/maps"
+	"golang.org/x/sys/unix"
 )
 
 const batchInterval = 250 * time.Millisecond
@@ -22,7 +25,9 @@ const maxBufferSize = 1000
 
 // watcher implements a recursive, batching file watcher on top of fsnotify.
 type watcher struct {
+	logger           *zap.Logger
 	root             string
+	ignorePaths      []string
 	watcher          *fsnotify.Watcher
 	closed           atomic.Bool
 	done             chan struct{}
@@ -30,24 +35,36 @@ type watcher struct {
 	mu               sync.Mutex
 	subscribers      map[int]drivers.WatchCallback
 	nextSubscriberID int
-	buffer           map[string]drivers.WatchEvent
+	buffer           map[string]watchEvent
 }
 
-func newWatcher(root string) (*watcher, error) {
+type watchEvent struct {
+	eventType runtimev1.FileEvent
+	path      string
+	relPath   string
+	dir       bool
+	isCreate  bool
+}
+
+// newWatcher creates a new watcher for the given root directory.
+// The root directory must be an absolute path.
+func newWatcher(root string, ignorePaths []string, logger *zap.Logger) (*watcher, error) {
 	fsw, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
 	}
 
 	w := &watcher{
+		logger:      logger,
 		root:        root,
+		ignorePaths: ignorePaths,
 		watcher:     fsw,
 		done:        make(chan struct{}),
 		subscribers: make(map[int]drivers.WatchCallback),
-		buffer:      make(map[string]drivers.WatchEvent),
+		buffer:      make(map[string]watchEvent),
 	}
 
-	err = w.addDir(root, false)
+	err = w.addDir(root, false, true)
 	if err != nil {
 		w.watcher.Close()
 		return nil, err
@@ -111,16 +128,42 @@ func (w *watcher) flush() {
 		return
 	}
 
+	for p, event := range w.buffer {
+		if !event.isCreate {
+			continue
+		}
+		// check for directory for CREATE events
+		info, err := os.Stat(event.path)
+		event.dir = err == nil && info.IsDir()
+		if event.dir {
+			// add directory to tracking paths
+			err = w.addDir(event.path, true, false)
+			if err != nil {
+				delete(w.buffer, p)
+				continue
+			}
+		}
+		w.buffer[p] = event
+	}
+
 	events := maps.Values(w.buffer)
+	driverEvents := make([]drivers.WatchEvent, len(events))
+	for i, event := range events {
+		driverEvents[i] = drivers.WatchEvent{
+			Type: event.eventType,
+			Path: event.relPath,
+			Dir:  event.dir,
+		}
+	}
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	for _, fn := range w.subscribers {
-		fn(events)
+		fn(driverEvents)
 	}
 
-	w.buffer = make(map[string]drivers.WatchEvent)
+	w.buffer = make(map[string]watchEvent)
 }
 
 func (w *watcher) run() {
@@ -141,42 +184,46 @@ func (w *watcher) runInner() error {
 			if !ok {
 				return nil
 			}
+			if err == nil || isNotExists(err) {
+				continue
+			}
 			return err
 		case e, ok := <-w.watcher.Events:
 			if !ok {
 				return nil
 			}
 
-			we := drivers.WatchEvent{}
-			if e.Has(fsnotify.Create) || e.Has(fsnotify.Write) || e.Has(fsnotify.Chmod) {
-				we.Type = runtimev1.FileEvent_FILE_EVENT_WRITE
-			} else if e.Has(fsnotify.Remove) || e.Has(fsnotify.Rename) {
-				we.Type = runtimev1.FileEvent_FILE_EVENT_DELETE
+			we := watchEvent{}
+			if e.Has(fsnotify.Remove) || e.Has(fsnotify.Rename) {
+				we.eventType = runtimev1.FileEvent_FILE_EVENT_DELETE
+			} else if e.Has(fsnotify.Create) || e.Has(fsnotify.Write) || e.Has(fsnotify.Chmod) {
+				we.eventType = runtimev1.FileEvent_FILE_EVENT_WRITE
 			} else {
 				continue
 			}
+			we.isCreate = e.Has(fsnotify.Create)
 
-			path, err := filepath.Rel(w.root, e.Name)
+			p, err := filepath.Rel(w.root, e.Name)
 			if err != nil {
-				return err
-			}
-			path = filepath.Join("/", path)
-			we.Path = path
-
-			if e.Has(fsnotify.Create) {
-				info, err := os.Stat(e.Name)
-				we.Dir = err == nil && info.IsDir()
+				w.logger.Warn("ignoring watcher event: failed to get relative path", zap.String("root", w.root), zap.String("event_name", e.Name), zap.String("event_op", e.Op.String()))
+				continue
 			}
 
-			w.buffer[path] = we
+			p = path.Join("/", p)
+			we.relPath = p
+			we.path = e.Name
 
-			// Calling addDir after appending to w.buffer, to sequence events correctly
-			if we.Dir && e.Has(fsnotify.Create) {
-				err = w.addDir(e.Name, true)
-				if err != nil {
-					return err
-				}
+			// Do not send files for ignored paths
+			if drivers.IsIgnored(p, w.ignorePaths) {
+				continue
 			}
+
+			existing, ok := w.buffer[p]
+			if ok && existing.isCreate && we.eventType == runtimev1.FileEvent_FILE_EVENT_WRITE {
+				// copy over `IsCreate` within the batch for a path
+				we.isCreate = existing.isCreate
+			}
+			w.buffer[p] = we
 
 			// Reset the timer so we only flush when no events have been observed for batchInterval.
 			// (But to avoid the buffer growing infinitely in edge cases, we enforce a max buffer size.)
@@ -190,39 +237,44 @@ func (w *watcher) runInner() error {
 	}
 }
 
-func (w *watcher) addDir(path string, replay bool) error {
-	err := w.watcher.Add(path)
+func (w *watcher) addDir(p string, replay, errIfNotExist bool) error {
+	err := w.watcher.Add(p)
 	if err != nil {
+		// Need to check unix.ENOENT (and probably others) since fsnotify doesn't always use cross-platform syscalls.
+		if !errIfNotExist && isNotExists(err) {
+			return nil
+		}
 		return err
 	}
 
-	entries, err := os.ReadDir(path)
+	entries, err := os.ReadDir(p)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if !errIfNotExist && isNotExists(err) {
 			return nil
 		}
 		return err
 	}
 
 	for _, e := range entries {
-		fullPath := filepath.Join(path, e.Name())
+		fullPath := filepath.Join(p, e.Name())
 
 		if replay {
 			ep, err := filepath.Rel(w.root, fullPath)
 			if err != nil {
 				return err
 			}
-			ep = filepath.Join("/", ep)
+			ep = path.Join("/", ep)
 
-			w.buffer[ep] = drivers.WatchEvent{
-				Path: ep,
-				Type: runtimev1.FileEvent_FILE_EVENT_WRITE,
-				Dir:  e.IsDir(),
+			w.buffer[ep] = watchEvent{
+				path:      fullPath,
+				relPath:   ep,
+				eventType: runtimev1.FileEvent_FILE_EVENT_WRITE,
+				dir:       e.IsDir(),
 			}
 		}
 
 		if e.IsDir() {
-			err := w.addDir(fullPath, replay)
+			err := w.addDir(fullPath, replay, errIfNotExist)
 			if err != nil {
 				return err
 			}
@@ -230,4 +282,8 @@ func (w *watcher) addDir(path string, replay bool) error {
 	}
 
 	return nil
+}
+
+func isNotExists(err error) bool {
+	return os.IsNotExist(err) || errors.Is(err, unix.ENOENT)
 }

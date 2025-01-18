@@ -13,6 +13,7 @@ import (
 // AuthToken is the interface package admin uses to provide a consolidated view of a token string and its DB model.
 type AuthToken interface {
 	Token() *authtoken.Token
+	TokenModel() any
 	OwnerID() string
 }
 
@@ -24,6 +25,10 @@ type userAuthToken struct {
 
 func (t *userAuthToken) Token() *authtoken.Token {
 	return t.token
+}
+
+func (t *userAuthToken) TokenModel() any {
+	return t.model
 }
 
 func (t *userAuthToken) OwnerID() string {
@@ -70,6 +75,10 @@ func (t *serviceAuthToken) Token() *authtoken.Token {
 	return t.token
 }
 
+func (t *serviceAuthToken) TokenModel() any {
+	return t.model
+}
+
 func (t *serviceAuthToken) OwnerID() string {
 	return t.model.ServiceID
 }
@@ -107,6 +116,10 @@ func (t *deploymentAuthToken) Token() *authtoken.Token {
 	return t.token
 }
 
+func (t *deploymentAuthToken) TokenModel() any {
+	return t.model
+}
+
 func (t *deploymentAuthToken) OwnerID() string {
 	return t.model.DeploymentID
 }
@@ -132,6 +145,72 @@ func (s *Service) IssueDeploymentAuthToken(ctx context.Context, deploymentID str
 	}
 
 	return &deploymentAuthToken{model: dat, token: tkn}, nil
+}
+
+// magicAuthToken implements AuthToken for magic tokens belonging to a project.
+type magicAuthToken struct {
+	model *database.MagicAuthToken
+	token *authtoken.Token
+}
+
+func (t *magicAuthToken) Token() *authtoken.Token {
+	return t.token
+}
+
+func (t *magicAuthToken) TokenModel() any {
+	return t.model
+}
+
+func (t *magicAuthToken) OwnerID() string {
+	return t.model.ID
+}
+
+// IssueMagicAuthTokenOptions provides options for IssueMagicAuthToken.
+type IssueMagicAuthTokenOptions struct {
+	ProjectID       string
+	TTL             *time.Duration
+	CreatedByUserID *string
+	Attributes      map[string]any
+	ResourceType    string
+	ResourceName    string
+	FilterJSON      string
+	Fields          []string
+	State           string
+	DisplayName     string
+	Internal        bool
+}
+
+// IssueMagicAuthToken generates and persists a new magic auth token for a project.
+func (s *Service) IssueMagicAuthToken(ctx context.Context, opts *IssueMagicAuthTokenOptions) (AuthToken, error) {
+	tkn := authtoken.NewRandom(authtoken.TypeMagic)
+
+	var expiresOn *time.Time
+	if opts.TTL != nil {
+		t := time.Now().Add(*opts.TTL)
+		expiresOn = &t
+	}
+
+	dat, err := s.DB.InsertMagicAuthToken(ctx, &database.InsertMagicAuthTokenOptions{
+		ID:              tkn.ID.String(),
+		SecretHash:      tkn.SecretHash(),
+		Secret:          tkn.Secret[:],
+		ProjectID:       opts.ProjectID,
+		ExpiresOn:       expiresOn,
+		CreatedByUserID: opts.CreatedByUserID,
+		Attributes:      opts.Attributes,
+		ResourceType:    opts.ResourceType,
+		ResourceName:    opts.ResourceName,
+		FilterJSON:      opts.FilterJSON,
+		Fields:          opts.Fields,
+		State:           opts.State,
+		DisplayName:     opts.DisplayName,
+		Internal:        opts.Internal,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &magicAuthToken{model: dat, token: tkn}, nil
 }
 
 // ValidateAuthToken validates an auth token against persistent storage.
@@ -193,9 +272,25 @@ func (s *Service) ValidateAuthToken(ctx context.Context, token string) (AuthToke
 		}
 
 		s.Used.DeploymentToken(dat.ID)
-		s.Used.Deployment(dat.DeploymentID)
 
 		return &deploymentAuthToken{model: dat, token: parsed}, nil
+	case authtoken.TypeMagic:
+		mat, err := s.DB.FindMagicAuthToken(ctx, parsed.ID.String(), false)
+		if err != nil {
+			return nil, err
+		}
+
+		if mat.ExpiresOn != nil && mat.ExpiresOn.Before(time.Now()) {
+			return nil, fmt.Errorf("auth token is expired")
+		}
+
+		if !bytes.Equal(mat.SecretHash, parsed.SecretHash()) {
+			return nil, fmt.Errorf("invalid auth token")
+		}
+
+		s.Used.MagicAuthToken(mat.ID)
+
+		return &magicAuthToken{model: mat, token: parsed}, nil
 	default:
 		return nil, fmt.Errorf("unknown auth token type %q", parsed.Type)
 	}
@@ -214,6 +309,8 @@ func (s *Service) RevokeAuthToken(ctx context.Context, token string) error {
 		return s.DB.DeleteServiceAuthToken(ctx, parsed.ID.String())
 	case authtoken.TypeDeployment:
 		return fmt.Errorf("deployment auth tokens cannot be revoked")
+	case authtoken.TypeMagic:
+		return s.DB.DeleteMagicAuthToken(ctx, parsed.ID.String())
 	default:
 		return fmt.Errorf("unknown auth token type %q", parsed.Type)
 	}

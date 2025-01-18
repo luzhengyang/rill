@@ -1,65 +1,57 @@
 <script lang="ts">
-  import { goto } from "$app/navigation";
+  import { goto, invalidate } from "$app/navigation";
   import Overlay from "@rilldata/web-common/components/overlay/Overlay.svelte";
   import { getFilePathFromNameAndType } from "@rilldata/web-common/features/entity-management/entity-mappers";
   import { EntityType } from "@rilldata/web-common/features/entity-management/types";
-  import { useModelFileNames } from "@rilldata/web-common/features/models/selectors";
-  import { useSourceFileNames } from "@rilldata/web-common/features/sources/selectors";
-  import { checkSourceImported } from "@rilldata/web-common/features/sources/source-imported-utils";
   import { createRuntimeServiceUnpackEmpty } from "@rilldata/web-common/runtime-client";
-  import { useQueryClient } from "@tanstack/svelte-query";
   import { runtime } from "../../../runtime-client/runtime-store";
   import { EMPTY_PROJECT_TITLE } from "../../welcome/constants";
-  import { useIsProjectInitialized } from "../../welcome/is-project-initialized";
-  import { compileCreateSourceYAML } from "../sourceUtils";
+  import { isProjectInitialized } from "../../welcome/is-project-initialized";
+  import { compileLocalFileSourceYAML } from "../sourceUtils";
   import { createSource } from "./createSource";
   import { uploadTableFiles } from "./file-upload";
 
   export let showDropOverlay: boolean;
 
-  const queryClient = useQueryClient();
-
-  $: runtimeInstanceId = $runtime.instanceId;
-  $: sourceNames = useSourceFileNames(runtimeInstanceId);
-  $: modelNames = useModelFileNames(runtimeInstanceId);
-  $: isProjectInitialized = useIsProjectInitialized(runtimeInstanceId);
+  $: ({ instanceId } = $runtime);
 
   const unpackEmptyProject = createRuntimeServiceUnpackEmpty();
 
   const handleSourceDrop = async (e: DragEvent) => {
     showDropOverlay = false;
 
-    const uploadedFiles = uploadTableFiles(
-      Array.from(e?.dataTransfer?.files),
-      [$sourceNames?.data, $modelNames?.data],
-      $runtime.instanceId
-    );
+    const files = e?.dataTransfer?.files;
+
+    // no-op if no files are dropped
+    if (files === undefined) return;
+
+    const uploadedFiles = uploadTableFiles(Array.from(files), instanceId);
+
+    const initialized = await isProjectInitialized(instanceId);
     for await (const { tableName, filePath } of uploadedFiles) {
       try {
         // If project is uninitialized, initialize an empty project
-        if (!$isProjectInitialized.data) {
+        if (!initialized) {
           $unpackEmptyProject.mutate({
-            instanceId: $runtime.instanceId,
+            instanceId,
             data: {
-              title: EMPTY_PROJECT_TITLE,
+              displayName: EMPTY_PROJECT_TITLE,
             },
           });
+
+          // Race condition: invalidate("init") must be called before we navigate to
+          // `/files/${newFilePath}`. invalidate("init") is also called in the
+          // `WatchFilesClient`, but there it's not guaranteed to get invoked before we need it.
+          await invalidate("init");
         }
 
-        const yaml = compileCreateSourceYAML(
-          {
-            sourceName: tableName,
-            path: filePath,
-          },
-          "local_file"
-        );
-        await createSource(runtimeInstanceId, tableName, yaml);
-        checkSourceImported(
-          queryClient,
+        const yaml = compileLocalFileSourceYAML(filePath);
+        await createSource(instanceId, tableName, yaml);
+        const newFilePath = getFilePathFromNameAndType(
           tableName,
-          getFilePathFromNameAndType(tableName, EntityType.Table)
+          EntityType.Table,
         );
-        goto(`/source/${tableName}`);
+        await goto(`/files${newFilePath}`);
       } catch (err) {
         console.error(err);
       }
@@ -69,7 +61,6 @@
 
 <Overlay bg="rgba(0,0,0,.6)">
   <div
-    role="presentation"
     class="w-screen h-screen grid place-content-center"
     on:dragenter|preventDefault|stopPropagation
     on:dragleave|preventDefault|stopPropagation
@@ -79,6 +70,7 @@
     on:mouseup|preventDefault|stopPropagation={() => {
       showDropOverlay = false;
     }}
+    role="presentation"
   >
     <div
       class="grid place-content-center grid-gap-2 text-white m-auto p-6 break-all text-3xl"

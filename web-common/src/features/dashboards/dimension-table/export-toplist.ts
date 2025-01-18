@@ -1,68 +1,50 @@
-import type { TimeControlStore } from "@rilldata/web-common/features/dashboards/time-controls/time-control-store";
-import type {
+import { getDimensionTableAggregationRequestForTime } from "@rilldata/web-common/features/dashboards/dimension-table/dimension-table-export-utils";
+import type { StateManagers } from "@rilldata/web-common/features/dashboards/state-managers/state-managers";
+import {
   V1ExportFormat,
-  V1MetricsViewAggregationMeasure,
   createQueryServiceExport,
 } from "@rilldata/web-common/runtime-client";
 import { get } from "svelte/store";
-import { useDashboardStore } from "web-common/src/features/dashboards/stores/dashboard-stores";
 import { runtime } from "../../../runtime-client/runtime-store";
-import { getQuerySortType } from "../leaderboard/leaderboard-utils";
-import { SortDirection } from "../proto-state/derived-types";
 
 export default async function exportToplist({
+  ctx,
   query,
-  metricViewName,
   format,
-  timeControlStore,
+  searchText,
 }: {
+  ctx: StateManagers;
   query: ReturnType<typeof createQueryServiceExport>;
-  metricViewName: string;
   format: V1ExportFormat;
-  // we need this from argument since getContext is called to get the state managers
-  // which cannot run outside of component initialisation
-  timeControlStore: TimeControlStore;
+  searchText: string;
 }) {
-  const dashboardStore = useDashboardStore(metricViewName);
-  const timeControlState = get(timeControlStore);
+  const metricsViewName = get(ctx.metricsViewName);
+  const dashboard = get(ctx.dashboardStore);
+  const timeControlState = get(
+    ctx.selectors.timeRangeSelectors.timeControlsState,
+  );
 
-  const dashboard = get(dashboardStore);
   const result = await get(query).mutateAsync({
     instanceId: get(runtime).instanceId,
     data: {
       format,
       query: {
-        metricsViewComparisonRequest: {
-          instanceId: get(runtime).instanceId,
-          metricsViewName: metricViewName,
-          dimension: {
-            name: dashboard.selectedDimensionName,
-          },
-          measures: dashboard.selectedMeasureNames.map(
-            (name) =>
-              <V1MetricsViewAggregationMeasure>{
-                name: name,
-              }
-          ),
-          timeRange: {
-            start: timeControlState.timeStart,
-            end: timeControlState.timeEnd,
-          },
-          comparisonTimeRange: {
-            start: timeControlState.comparisonTimeStart,
-            end: timeControlState.comparisonTimeEnd,
-          },
-          sort: [
+        metricsViewAggregationRequest:
+          getDimensionTableAggregationRequestForTime(
+            metricsViewName,
+            dashboard,
             {
-              name: dashboard.leaderboardMeasureName,
-              desc: dashboard.sortDirection === SortDirection.DESCENDING,
-              type: getQuerySortType(dashboard.dashboardSortType),
+              start: timeControlState.timeStart,
+              end: timeControlState.timeEnd,
             },
-          ],
-          filter: dashboard.filters,
-          limit: undefined, // the backend handles export limits
-          offset: "0",
-        },
+            timeControlState.showTimeComparison
+              ? {
+                  start: timeControlState.comparisonTimeStart,
+                  end: timeControlState.comparisonTimeEnd,
+                }
+              : undefined,
+            searchText,
+          ),
       },
     },
   });

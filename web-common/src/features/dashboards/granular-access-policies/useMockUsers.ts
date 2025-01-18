@@ -9,16 +9,21 @@ export interface MockUser {
 }
 
 export function useMockUsers(instanceId: string) {
-  return createRuntimeServiceGetFile(instanceId, `rill.yaml`, {
-    query: {
-      select: (data) => {
-        const yamlObj = parseDocument(data.blob, {
-          logLevel: "error",
-        })?.toJS();
-        const mockUsers =
-          yamlObj?.mock_users?.filter((user: MockUser) => user?.email) || [];
-        return mockUsers as Array<MockUser>;
+  return createRuntimeServiceGetFile(
+    instanceId,
+    { path: `rill.yaml` },
+    {
+      query: {
+        select: (data) => {
+          if (!data.blob) return [];
+          const yamlObj = parseDocument(data.blob, {
+            logLevel: "error",
+          })?.toJS();
+          const mockUsers =
+            yamlObj?.mock_users?.filter((user: MockUser) => user?.email) || [];
+          return mockUsers as Array<MockUser>;
+        },
       },
     },
-  });
+  );
 }

@@ -1,42 +1,58 @@
-import type { MetricsExplorerEntity } from "@rilldata/web-common/features/dashboards/stores/metrics-explorer-entity";
-import { writable, Writable, Readable, derived, get } from "svelte/store";
-import { getContext } from "svelte";
-import type { QueryClient, QueryObserverResult } from "@tanstack/svelte-query";
-import type { Runtime } from "@rilldata/web-common/runtime-client/runtime-store";
 import {
-  MetricsExplorerStoreType,
+  type ContextColWidths,
+  type MetricsExplorerEntity,
+  contextColWidthDefaults,
+} from "@rilldata/web-common/features/dashboards/stores/metrics-explorer-entity";
+import { createPersistentDashboardStore } from "@rilldata/web-common/features/dashboards/stores/persistent-dashboard-state";
+import { getDefaultExplorePreset } from "@rilldata/web-common/features/dashboards/url-state/getDefaultExplorePreset";
+import { initLocalUserPreferenceStore } from "@rilldata/web-common/features/dashboards/user-preferences";
+import {
+  type ExploreValidSpecResponse,
+  useExploreValidSpec,
+} from "@rilldata/web-common/features/explores/selectors";
+import {
+  type RpcStatus,
+  type V1ExplorePreset,
+  type V1MetricsViewTimeRangeResponse,
+  createQueryServiceMetricsViewTimeRange,
+} from "@rilldata/web-common/runtime-client";
+import type { Runtime } from "@rilldata/web-common/runtime-client/runtime-store";
+import { runtime } from "@rilldata/web-common/runtime-client/runtime-store";
+import type { QueryClient, QueryObserverResult } from "@tanstack/svelte-query";
+import { getContext } from "svelte";
+import {
+  type Readable,
+  type Writable,
+  derived,
+  get,
+  writable,
+} from "svelte/store";
+import {
+  type MetricsExplorerStoreType,
   metricsExplorerStore,
   updateMetricsExplorerByName,
-  useDashboardStore,
+  useExploreState,
 } from "web-common/src/features/dashboards/stores/dashboard-stores";
-import { runtime } from "@rilldata/web-common/runtime-client/runtime-store";
-import {
-  StateManagerReadables,
-  createStateManagerReadables,
-} from "./selectors";
-import { createStateManagerActions, type StateManagerActions } from "./actions";
+import { type StateManagerActions, createStateManagerActions } from "./actions";
 import type { DashboardCallbackExecutor } from "./actions/types";
 import {
-  ResourceKind,
-  useResource,
-} from "../../entity-management/resource-selectors";
-import {
-  createQueryServiceColumnTimeRange,
-  V1ColumnTimeRangeResponse,
-  type RpcStatus,
-  type V1MetricsViewSpec,
-} from "@rilldata/web-common/runtime-client";
+  type StateManagerReadables,
+  createStateManagerReadables,
+} from "./selectors";
 
 export type StateManagers = {
   runtime: Writable<Runtime>;
   metricsViewName: Writable<string>;
+  exploreName: Writable<string>;
   metricsStore: Readable<MetricsExplorerStoreType>;
   dashboardStore: Readable<MetricsExplorerEntity>;
   timeRangeSummaryStore: Readable<
-    QueryObserverResult<V1ColumnTimeRangeResponse, unknown>
+    QueryObserverResult<V1MetricsViewTimeRangeResponse, unknown>
+  >;
+  validSpecStore: Readable<
+    QueryObserverResult<ExploreValidSpecResponse, RpcStatus>
   >;
   queryClient: QueryClient;
-  setMetricsViewName: (s: string) => void;
   updateDashboard: DashboardCallbackExecutor;
   /**
    * A collection of Readables that can be used to select data from the dashboard.
@@ -46,6 +62,14 @@ export type StateManagers = {
    * A collection of functions that update the dashboard data model.
    */
   actions: StateManagerActions;
+  /**
+   * Store to track the width of the context columns in leaderboards.
+   * FIXME: this was implemented as a low-risk fix for in advance of
+   * the new branding release 2024-01-31, but should be revisted since
+   * it's a one-off solution that introduces another new pattern.
+   */
+  contextColumnWidths: Writable<ContextColWidths>;
+  defaultExploreState: Readable<V1ExplorePreset>;
 };
 
 export const DEFAULT_STORE_KEY = Symbol("state-managers");
@@ -57,85 +81,111 @@ export function getStateManagers(): StateManagers {
 export function createStateManagers({
   queryClient,
   metricsViewName,
+  exploreName,
+  extraKeyPrefix,
 }: {
   queryClient: QueryClient;
   metricsViewName: string;
+  exploreName: string;
+  extraKeyPrefix?: string;
 }): StateManagers {
   const metricsViewNameStore = writable(metricsViewName);
+  const exploreNameStore = writable(exploreName);
+
   const dashboardStore: Readable<MetricsExplorerEntity> = derived(
-    [metricsViewNameStore],
+    [exploreNameStore],
     ([name], set) => {
-      const store = useDashboardStore(name);
-      return store.subscribe(set);
-    }
+      const exploreState = useExploreState(name);
+      return exploreState.subscribe(set);
+    },
   );
 
-  // Note: this is equivalent to `useMetaQuery`
-  const metricsSpecStore: Readable<
-    QueryObserverResult<V1MetricsViewSpec, RpcStatus>
-  > = derived([runtime, metricsViewNameStore], ([r, metricViewName], set) => {
-    useResource(
-      r.instanceId,
-      metricViewName,
-      ResourceKind.MetricsView,
-      (data) => data.metricsView?.state?.validSpec,
-      queryClient
-    ).subscribe(set);
-  });
+  const validSpecStore: Readable<
+    QueryObserverResult<ExploreValidSpecResponse, RpcStatus>
+  > = derived([runtime, exploreNameStore], ([r, exploreName], set) =>
+    useExploreValidSpec(r.instanceId, exploreName, { queryClient }).subscribe(
+      set,
+    ),
+  );
 
   const timeRangeSummaryStore: Readable<
-    QueryObserverResult<V1ColumnTimeRangeResponse, unknown>
-  > = derived([runtime, metricsSpecStore], ([runtime, metricsView], set) =>
-    createQueryServiceColumnTimeRange(
-      runtime.instanceId,
-      metricsView.data?.table ?? "",
-      {
-        columnName: metricsView.data?.timeDimension,
-      },
-      {
-        query: {
-          enabled: !!metricsView.data?.timeDimension,
-          queryClient: queryClient,
+    QueryObserverResult<V1MetricsViewTimeRangeResponse, unknown>
+  > = derived(
+    [runtime, metricsViewNameStore, validSpecStore],
+    ([runtime, mvName, validSpec], set) =>
+      createQueryServiceMetricsViewTimeRange(
+        runtime.instanceId,
+        mvName,
+        {},
+        {
+          query: {
+            queryClient,
+            enabled: !!validSpec?.data?.metricsView?.timeDimension,
+            staleTime: Infinity,
+            cacheTime: Infinity,
+          },
         },
-      }
-    ).subscribe(set)
+      ).subscribe(set),
   );
 
   const updateDashboard = (
-    callback: (metricsExplorer: MetricsExplorerEntity) => void
+    callback: (metricsExplorer: MetricsExplorerEntity) => void,
   ) => {
     const name = get(dashboardStore).name;
     // TODO: Remove dependency on MetricsExplorerStore singleton and its exports
     updateMetricsExplorerByName(name, callback);
   };
 
+  const contextColumnWidths = writable<ContextColWidths>(
+    contextColWidthDefaults,
+  );
+
+  const defaultExploreState = derived(
+    [validSpecStore, timeRangeSummaryStore],
+    ([validSpec, timeRangeSummary]) => {
+      if (!validSpec.data?.explore) {
+        return {};
+      }
+      return getDefaultExplorePreset(
+        validSpec.data?.explore ?? {},
+        timeRangeSummary.data,
+      );
+    },
+  );
+
+  const persistentDashboardStore = createPersistentDashboardStore(
+    (extraKeyPrefix || "") + exploreName,
+  );
+  initLocalUserPreferenceStore(exploreName);
+
   return {
     runtime: runtime,
     metricsViewName: metricsViewNameStore,
+    exploreName: exploreNameStore,
     metricsStore: metricsExplorerStore,
     timeRangeSummaryStore,
+    validSpecStore,
     queryClient,
     dashboardStore,
-    setMetricsViewName: (name) => {
-      metricsViewNameStore.set(name);
-    },
+
     updateDashboard,
     /**
      * A collection of Readables that can be used to select data from the dashboard.
      */
     selectors: createStateManagerReadables({
       dashboardStore,
-      metricsSpecQueryResultStore: metricsSpecStore,
+      validSpecStore,
       timeRangeSummaryStore,
+      queryClient,
     }),
     /**
      * A collection of functions that update the dashboard data model.
      */
     actions: createStateManagerActions({
       updateDashboard,
-      cancelQueries: () => {
-        queryClient.cancelQueries();
-      },
+      persistentDashboardStore,
     }),
+    contextColumnWidths,
+    defaultExploreState,
   };
 }

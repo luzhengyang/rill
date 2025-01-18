@@ -5,6 +5,7 @@
  * - there's some legacy stuff that needs to get deprecated out of this.
  * - we need tests for this.
  */
+import { TDDChart } from "@rilldata/web-common/features/dashboards/time-dimension-details/types";
 import { getSmallestTimeGrain } from "@rilldata/web-common/lib/time/ranges/iso-ranges";
 import {
   addZoneOffset,
@@ -28,10 +29,11 @@ import {
 } from "../transforms";
 import {
   RangePresetType,
+  TimeComparisonOption,
   TimeOffsetType,
-  TimeRange,
-  TimeRangeMeta,
-  TimeRangeOption,
+  type TimeRange,
+  type TimeRangeMeta,
+  type TimeRangeOption,
   TimeRangePreset,
 } from "../types";
 
@@ -41,7 +43,7 @@ export function getChildTimeRanges(
   end: Date,
   ranges: Record<string, TimeRangeMeta>,
   minTimeGrain: V1TimeGrain,
-  zone: string
+  zone: string,
 ): TimeRangeOption[] {
   const timeRanges: TimeRangeOption[] = [];
 
@@ -65,13 +67,13 @@ export function getChildTimeRanges(
         end,
         timeRange.start,
         timeRange.end,
-        zone
+        zone,
       );
 
       // check if time range is possible with given minTimeGrain
       const thisRangeAllowedGrains = getAllowedTimeGrains(
         timeRangeDates.startDate,
-        timeRangeDates.endDate
+        timeRangeDates.endDate,
       );
 
       const hasSomeGrainMatches = thisRangeAllowedGrains.some((grain) => {
@@ -84,9 +86,14 @@ export function getChildTimeRanges(
 
       const isGrainPossible = !isGrainBigger(
         minTimeGrain,
-        allowedMaxGrain.grain
+        allowedMaxGrain.grain,
       );
-      if (isGrainPossible && hasSomeGrainMatches) {
+
+      const isRangeValid =
+        isWithinRange(timeRangeDates.startDate, start, end) ||
+        isWithinRange(timeRangeDates.endDate, start, end);
+
+      if (isRangeValid && isGrainPossible && hasSomeGrainMatches) {
         timeRanges.push({
           name: timePreset as TimeRangePreset,
           label: timeRange.label,
@@ -103,8 +110,8 @@ export function getChildTimeRanges(
 // TODO: investigate whether we need this after we've removed the need
 // for the config's default_time_Range to be an ISO duration.
 export function ISODurationToTimePreset(
-  isoDuration: string,
-  defaultToAllTime = true
+  isoDuration: string | undefined,
+  defaultToAllTime = true,
 ): TimeRangePreset | undefined {
   switch (isoDuration) {
     case "PT6H":
@@ -130,10 +137,10 @@ export function ISODurationToTimePreset(
 
 /* Converts a Time Range preset to a TimeRange object */
 export function convertTimeRangePreset(
-  timeRangePreset: TimeRangePreset,
+  timeRangePreset: TimeRangePreset | TimeComparisonOption,
   start: Date,
   end: Date,
-  zone: string
+  zone: string,
 ): TimeRange {
   if (timeRangePreset === TimeRangePreset.ALL_TIME) {
     return {
@@ -147,7 +154,7 @@ export function convertTimeRangePreset(
     end,
     timeRange.start,
     timeRange.end,
-    zone
+    zone,
   );
 
   return {
@@ -163,22 +170,18 @@ export function convertTimeRangePreset(
  * colocate the code w/ the component.
  */
 export const prettyFormatTimeRange = (
-  start: Date,
-  end: Date,
-  timePreset: TimeRangePreset,
-  timeZone: string
+  start: Date | undefined,
+  end: Date | undefined,
+  timePreset: TimeRangePreset | TimeComparisonOption | undefined,
+  timeZone: string,
 ): string => {
   const isAllTime = timePreset === TimeRangePreset.ALL_TIME;
-  if (!start && end) {
-    return `- ${end}`;
-  }
 
-  if (start && !end) {
+  if (!start) {
+    return end ? `- ${end}` : "";
+  }
+  if (!end) {
     return `${start} -`;
-  }
-
-  if (!start && !end) {
-    return "";
   }
 
   const {
@@ -255,12 +258,12 @@ export const prettyFormatTimeRange = (
     // beyond this point, we're dealing with time ranges that are full day periods
     // since time range is exclusive at the end, we need to subtract a day
     inclusiveEndDate = new Date(
-      end.getTime() - durationToMillis(TIME_GRAIN.TIME_GRAIN_DAY.duration)
+      end.getTime() - durationToMillis(TIME_GRAIN.TIME_GRAIN_DAY.duration),
     );
 
     const inclusiveEndDateWithTimeZone = getDateMonthYearForTimezone(
       inclusiveEndDate,
-      timeZone
+      timeZone,
     );
 
     endDate = inclusiveEndDateWithTimeZone.day;
@@ -316,7 +319,7 @@ export const prettyFormatTimeRange = (
   };
   return `${start.toLocaleDateString(
     undefined,
-    dateFormatOptions
+    dateFormatOptions,
   )} - ${inclusiveEndDate.toLocaleDateString(undefined, dateFormatOptions)}`;
 };
 
@@ -328,34 +331,34 @@ export function getAdjustedFetchTime(
   startTime: Date,
   endTime: Date,
   zone: string,
-  interval: V1TimeGrain
+  interval: V1TimeGrain | undefined,
 ) {
-  if (!startTime || !endTime)
+  if (!startTime || !endTime || !interval)
     return { start: startTime?.toISOString(), end: endTime?.toISOString() };
   const offsetedStartTime = getOffset(
     startTime,
     TIME_GRAIN[interval].duration,
-    TimeOffsetType.SUBTRACT
+    TimeOffsetType.SUBTRACT,
   );
 
   // the data point previous to the first date inside the chart.
   const fetchStartTime = getStartOfPeriod(
     offsetedStartTime,
     TIME_GRAIN[interval].duration,
-    zone
+    zone,
   );
 
   const offsetedEndTime = getOffset(
     endTime,
     TIME_GRAIN[interval].duration,
-    TimeOffsetType.ADD
+    TimeOffsetType.ADD,
   );
 
   // the data point after the last complete date.
   const fetchEndTime = getStartOfPeriod(
     offsetedEndTime,
     TIME_GRAIN[interval].duration,
-    zone
+    zone,
   );
 
   return {
@@ -369,14 +372,15 @@ export function getAdjustedFetchTime(
  * time series charts
  */
 export function getAdjustedChartTime(
-  start: Date,
-  end: Date,
+  start: Date | undefined,
+  end: Date | undefined,
   zone: string,
-  interval: V1TimeGrain,
-  timePreset: TimeRangePreset,
-  defaultTimeRange: string
+  interval: V1TimeGrain | undefined,
+  timePreset: TimeRangePreset | TimeComparisonOption | undefined,
+  defaultTimeRange: string | undefined,
+  chartType: TDDChart,
 ) {
-  if (!start || !end)
+  if (!start || !end || !interval)
     return {
       start,
       end,
@@ -385,20 +389,25 @@ export function getAdjustedChartTime(
   const grainDuration = TIME_GRAIN[interval].duration;
   const offsetDuration = getDurationMultiple(grainDuration, 0.45);
 
+  let adjustedStart = new Date(start);
   let adjustedEnd = new Date(end);
 
   if (timePreset === TimeRangePreset.ALL_TIME) {
     // No offset has been applied to All time range so far
     // Adjust end according to the interval
-    start = getStartOfPeriod(start, grainDuration, zone);
-    start = getOffset(start, offsetDuration, TimeOffsetType.ADD);
+    adjustedStart = getStartOfPeriod(adjustedStart, grainDuration, zone);
+    adjustedStart = getOffset(
+      adjustedStart,
+      offsetDuration,
+      TimeOffsetType.ADD,
+    );
     adjustedEnd = getEndOfPeriod(adjustedEnd, grainDuration, zone);
   } else if (timePreset && timePreset === TimeRangePreset.DEFAULT) {
     // For default presets the iso range can be mixed. There the offset added will be the smallest unit in the range.
     // But for the graph we need the offset based on selected grain.
     const smallestTimeGrain = getSmallestTimeGrain(defaultTimeRange);
     // Only add this if the selected grain is greater than the smallest unit in the iso range
-    if (isGrainBigger(interval, smallestTimeGrain)) {
+    if (smallestTimeGrain && isGrainBigger(interval, smallestTimeGrain)) {
       adjustedEnd = getEndOfPeriod(adjustedEnd, grainDuration, zone);
     }
   } else {
@@ -406,10 +415,24 @@ export function getAdjustedChartTime(
     adjustedEnd = getEndOfPeriod(
       new Date(adjustedEnd.getTime() - 1),
       grainDuration,
-      zone
+      zone,
     );
   }
 
+  if (
+    chartType === TDDChart.GROUPED_BAR ||
+    chartType === TDDChart.STACKED_BAR
+  ) {
+    adjustedStart = getOffset(
+      adjustedStart,
+      offsetDuration,
+      TimeOffsetType.SUBTRACT,
+    );
+  }
+
+  /**
+   * We need to remove the offset from the end to remove whitespace
+   */
   adjustedEnd = getOffset(adjustedEnd, offsetDuration, TimeOffsetType.SUBTRACT);
 
   return {
@@ -418,7 +441,11 @@ export function getAdjustedChartTime(
      * To get the correct values, we need to remove the local time zone offset
      * and add the offset of the selected time zone.
      */
-    start: addZoneOffset(removeLocalTimezoneOffset(start), zone),
+    start: addZoneOffset(removeLocalTimezoneOffset(adjustedStart), zone),
     end: addZoneOffset(removeLocalTimezoneOffset(adjustedEnd), zone),
   };
+}
+
+function isWithinRange(time: Date, start: Date, end: Date) {
+  return time.getTime() >= start.getTime() && time.getTime() <= end.getTime();
 }

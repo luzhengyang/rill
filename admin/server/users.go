@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -27,7 +26,7 @@ func (s *Server) ListSuperusers(ctx context.Context, req *adminv1.ListSuperusers
 
 	users, err := s.admin.DB.FindSuperusers(ctx)
 	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, err
 	}
 
 	dtos := make([]*adminv1.User, len(users))
@@ -50,15 +49,12 @@ func (s *Server) SetSuperuser(ctx context.Context, req *adminv1.SetSuperuserRequ
 
 	user, err := s.admin.DB.FindUserByEmail(ctx, req.Email)
 	if err != nil {
-		if errors.Is(err, database.ErrNotFound) {
-			return nil, fmt.Errorf("user not found for email id %s", req.Email)
-		}
 		return nil, err
 	}
 
 	err = s.admin.DB.UpdateSuperuser(ctx, user.ID, req.Superuser)
 	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, err
 	}
 
 	return &adminv1.SetSuperuserResponse{}, nil
@@ -106,7 +102,7 @@ func (s *Server) GetCurrentUser(ctx context.Context, req *adminv1.GetCurrentUser
 
 	// Error if authenticated as anything other than a user
 	if claims.OwnerType() != auth.OwnerTypeUser {
-		return nil, fmt.Errorf("not authenticated as a user")
+		return nil, status.Error(codes.Unauthenticated, "not authenticated as a user")
 	}
 
 	// Owner is a user
@@ -128,7 +124,7 @@ func (s *Server) UpdateUserPreferences(ctx context.Context, req *adminv1.UpdateU
 
 	// Error if authenticated as anything other than a user
 	if claims.OwnerType() != auth.OwnerTypeUser {
-		return nil, fmt.Errorf("not authenticated as a user")
+		return nil, status.Error(codes.Unauthenticated, "not authenticated as a user")
 	}
 
 	if req.Preferences.TimeZone != nil {
@@ -151,7 +147,9 @@ func (s *Server) UpdateUserPreferences(ctx context.Context, req *adminv1.UpdateU
 		DisplayName:         user.DisplayName,
 		PhotoURL:            user.PhotoURL,
 		GithubUsername:      user.GithubUsername,
+		GithubRefreshToken:  user.GithubRefreshToken,
 		QuotaSingleuserOrgs: user.QuotaSingleuserOrgs,
+		QuotaTrialOrgs:      user.QuotaTrialOrgs,
 		PreferenceTimeZone:  valOrDefault(req.Preferences.TimeZone, user.PreferenceTimeZone),
 	})
 	if err != nil {
@@ -179,7 +177,7 @@ func (s *Server) IssueRepresentativeAuthToken(ctx context.Context, req *adminv1.
 
 	// Error if authenticated as anything other than a user
 	if claims.OwnerType() != auth.OwnerTypeUser {
-		return nil, fmt.Errorf("not authenticated as a user")
+		return nil, status.Error(codes.Unauthenticated, "not authenticated as a user")
 	}
 
 	u, err := s.admin.DB.FindUserByEmail(ctx, req.Email)
@@ -209,7 +207,7 @@ func (s *Server) RevokeCurrentAuthToken(ctx context.Context, req *adminv1.Revoke
 
 	// Error if authenticated as anything other than a user
 	if claims.OwnerType() != auth.OwnerTypeUser {
-		return nil, fmt.Errorf("not authenticated as a user")
+		return nil, status.Error(codes.Unauthenticated, "not authenticated as a user")
 	}
 	tokenID := claims.AuthTokenID()
 
@@ -242,7 +240,7 @@ func (s *Server) SudoGetResource(ctx context.Context, req *adminv1.SudoGetResour
 		if err != nil {
 			return nil, err
 		}
-		res.Resource = &adminv1.SudoGetResourceResponse_Org{Org: organizationToDTO(org)}
+		res.Resource = &adminv1.SudoGetResourceResponse_Org{Org: s.organizationToDTO(org, true)}
 	case *adminv1.SudoGetResourceRequest_ProjectId:
 		proj, err := s.admin.DB.FindProject(ctx, id.ProjectId)
 		if err != nil {
@@ -291,6 +289,9 @@ func (s *Server) SudoUpdateUserQuotas(ctx context.Context, req *adminv1.SudoUpda
 	if req.SingleuserOrgs != nil {
 		observability.AddRequestAttributes(ctx, attribute.Int("args.singleuser_orgs", int(*req.SingleuserOrgs)))
 	}
+	if req.TrialOrgs != nil {
+		observability.AddRequestAttributes(ctx, attribute.Int("args.trial_orgs", int(*req.TrialOrgs)))
+	}
 
 	claims := auth.GetClaims(ctx)
 	if !claims.Superuser(ctx) {
@@ -307,7 +308,9 @@ func (s *Server) SudoUpdateUserQuotas(ctx context.Context, req *adminv1.SudoUpda
 		DisplayName:         user.DisplayName,
 		PhotoURL:            user.PhotoURL,
 		GithubUsername:      user.GithubUsername,
-		QuotaSingleuserOrgs: int(valOrDefault(req.SingleuserOrgs, uint32(user.QuotaSingleuserOrgs))),
+		GithubRefreshToken:  user.GithubRefreshToken,
+		QuotaSingleuserOrgs: int(valOrDefault(req.SingleuserOrgs, int32(user.QuotaSingleuserOrgs))),
+		QuotaTrialOrgs:      int(valOrDefault(req.TrialOrgs, int32(user.QuotaTrialOrgs))),
 		PreferenceTimeZone:  user.PreferenceTimeZone,
 	})
 	if err != nil {
@@ -327,7 +330,7 @@ func (s *Server) SearchProjectUsers(ctx context.Context, req *adminv1.SearchProj
 
 	proj, err := s.admin.DB.FindProjectByName(ctx, req.Organization, req.Project)
 	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
+		return nil, err
 	}
 
 	claims := auth.GetClaims(ctx)
@@ -344,7 +347,7 @@ func (s *Server) SearchProjectUsers(ctx context.Context, req *adminv1.SearchProj
 
 	users, err := s.admin.DB.SearchProjectUsers(ctx, proj.ID, req.EmailQuery, token.Val, pageSize)
 	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, err
 	}
 
 	nextToken := ""
@@ -370,21 +373,23 @@ func userToPB(u *database.User) *adminv1.User {
 		DisplayName: u.DisplayName,
 		PhotoUrl:    u.PhotoURL,
 		Quotas: &adminv1.UserQuotas{
-			SingleuserOrgs: uint32(u.QuotaSingleuserOrgs),
+			SingleuserOrgs: int32(u.QuotaSingleuserOrgs),
+			TrialOrgs:      int32(u.QuotaTrialOrgs),
 		},
 		CreatedOn: timestamppb.New(u.CreatedOn),
 		UpdatedOn: timestamppb.New(u.UpdatedOn),
 	}
 }
 
-func memberToPB(m *database.Member) *adminv1.Member {
-	return &adminv1.Member{
-		UserId:    m.ID,
-		UserEmail: m.Email,
-		UserName:  m.DisplayName,
-		RoleName:  m.RoleName,
-		CreatedOn: timestamppb.New(m.CreatedOn),
-		UpdatedOn: timestamppb.New(m.UpdatedOn),
+func memberUserToPB(m *database.MemberUser) *adminv1.MemberUser {
+	return &adminv1.MemberUser{
+		UserId:       m.ID,
+		UserEmail:    m.Email,
+		UserName:     m.DisplayName,
+		UserPhotoUrl: m.PhotoURL,
+		RoleName:     m.RoleName,
+		CreatedOn:    timestamppb.New(m.CreatedOn),
+		UpdatedOn:    timestamppb.New(m.UpdatedOn),
 	}
 }
 

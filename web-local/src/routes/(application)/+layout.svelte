@@ -1,33 +1,34 @@
 <script lang="ts">
-  import { beforeNavigate } from "$app/navigation";
-  import { startWatchFilesClient } from "@rilldata/web-common/features/entity-management/watch-files-client";
-  import { startWatchResourcesClient } from "@rilldata/web-common/features/entity-management/watch-resources-client";
-  import { retainFeaturesFlags } from "@rilldata/web-common/features/feature-flags";
-  import RillDeveloperLayout from "@rilldata/web-common/layout/RillDeveloperLayout.svelte";
-  import RuntimeProvider from "@rilldata/web-common/runtime-client/RuntimeProvider.svelte";
-  import { RuntimeUrl } from "@rilldata/web-local/lib/application-state-stores/initialize-node-store-contexts";
-  import { QueryClientProvider } from "@tanstack/svelte-query";
-  import { onMount } from "svelte";
-  import { createQueryClient } from "../../lib/svelte-query/globalQueryClient";
+  import AddDataModal from "@rilldata/web-common/features/sources/modal/AddDataModal.svelte";
+  import FileDrop from "@rilldata/web-common/features/sources/modal/FileDrop.svelte";
+  import SourceImportedModal from "@rilldata/web-common/features/sources/modal/SourceImportedModal.svelte";
+  import { sourceImportedPath } from "@rilldata/web-common/features/sources/sources-store";
 
-  const queryClient = createQueryClient();
+  let showDropOverlay = false;
 
-  beforeNavigate(retainFeaturesFlags);
-
-  onMount(() => {
-    const stopWatchFilesClient = startWatchFilesClient(queryClient);
-    const stopWatchResourcesClient = startWatchResourcesClient(queryClient);
-    return () => {
-      stopWatchFilesClient();
-      stopWatchResourcesClient();
-    };
-  });
+  function isEventWithFiles(event: DragEvent) {
+    let types = event?.dataTransfer?.types;
+    return types && types.indexOf("Files") != -1;
+  }
 </script>
 
-<QueryClientProvider client={queryClient}>
-  <RuntimeProvider host={RuntimeUrl} instanceId="default">
-    <RillDeveloperLayout>
-      <slot />
-    </RillDeveloperLayout>
-  </RuntimeProvider>
-</QueryClientProvider>
+<main
+  role="application"
+  class="index-body relative size-full flex flex-col overflow-hidden"
+  on:drag|preventDefault|stopPropagation
+  on:drop|preventDefault|stopPropagation
+  on:dragenter|preventDefault|stopPropagation
+  on:dragleave|preventDefault|stopPropagation
+  on:dragover|preventDefault|stopPropagation={(e) => {
+    if (isEventWithFiles(e)) showDropOverlay = true;
+  }}
+>
+  <slot />
+</main>
+
+{#if showDropOverlay}
+  <FileDrop bind:showDropOverlay />
+{/if}
+
+<AddDataModal />
+<SourceImportedModal sourcePath={$sourceImportedPath} />

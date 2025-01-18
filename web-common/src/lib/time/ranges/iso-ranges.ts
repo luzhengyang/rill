@@ -7,15 +7,15 @@ import {
 import {
   RangePresetType,
   ReferencePoint,
-  RelativeTimeTransformation,
+  type RelativeTimeTransformation,
   TimeComparisonOption,
   TimeOffsetType,
-  TimeRange,
-  TimeRangeMeta,
+  type TimeRange,
+  type TimeRangeMeta,
   TimeRangePreset,
   TimeTruncationType,
 } from "@rilldata/web-common/lib/time/types";
-import { Duration } from "luxon";
+import { Duration, type DurationUnit } from "luxon";
 
 /**
  * Converts an ISO duration to a time range.
@@ -25,17 +25,17 @@ import { Duration } from "luxon";
 export function isoDurationToTimeRange(
   isoDuration: string,
   anchor: Date,
-  zone = "Etc/UTC"
+  zone = "UTC",
 ) {
   const startTime = transformDate(
     anchor,
     getStartTimeTransformations(isoDuration),
-    zone
+    zone,
   );
   const endTime = transformDate(
     anchor,
     getEndTimeTransformations(isoDuration),
-    zone
+    zone,
   );
   return {
     startTime,
@@ -55,7 +55,7 @@ export function isoDurationToFullTimeRange(
   isoDuration: string | undefined,
   start: Date,
   end: Date,
-  zone = "Etc/UTC"
+  zone = "UTC",
 ): TimeRange {
   if (!isoDuration) {
     return convertTimeRangePreset(TimeRangePreset.ALL_TIME, start, end, zone);
@@ -65,7 +65,7 @@ export function isoDurationToFullTimeRange(
       isoDuration as TimeRangePreset,
       start,
       end,
-      zone
+      zone,
     );
   }
 
@@ -77,20 +77,27 @@ export function isoDurationToFullTimeRange(
   };
 }
 
-export function humaniseISODuration(isoDuration: string): string {
+export function humaniseISODuration(
+  isoDuration: string,
+  toUpper = true,
+): string {
   if (!isoDuration) return "";
   const duration = Duration.fromISO(isoDuration);
   let humanISO = duration.toHuman({
     listStyle: "long",
   });
   humanISO = humanISO.replace(/(\d) (\w)/g, (substring, n, c) => {
-    return `${n} ${c.toUpperCase()}`;
+    return `${n} ${toUpper ? c.toUpperCase() : c}`;
   });
   humanISO = humanISO.replace(", and", " and");
   return humanISO;
 }
 
-export function getSmallestTimeGrain(isoDuration: string) {
+export function getSmallestTimeGrain(isoDuration: string | undefined) {
+  if (isoDuration === undefined) {
+    return undefined;
+  }
+
   const duration = Duration.fromISO(isoDuration);
   for (const { grain, unit } of PeriodAndUnits) {
     if (duration[unit]) {
@@ -103,7 +110,7 @@ export function getSmallestTimeGrain(isoDuration: string) {
 
 export function isoDurationToTimeRangeMeta(
   isoDuration: string,
-  defaultComparison: TimeComparisonOption
+  defaultComparison: TimeComparisonOption,
 ): TimeRangeMeta {
   return {
     label: `Last ${humaniseISODuration(isoDuration)}`,
@@ -120,8 +127,23 @@ export function isoDurationToTimeRangeMeta(
   };
 }
 
+export function shiftToLargest(duration: Duration, units: DurationUnit[]) {
+  let shiftedDuration = duration.shiftTo(...units);
+  const largestUnit = getLargestUnit(shiftedDuration, units);
+  if (!largestUnit) return duration;
+  shiftedDuration = shiftedDuration.shiftTo(largestUnit);
+  return shiftedDuration.set({
+    [largestUnit]: Math.floor(shiftedDuration[largestUnit] as number),
+  });
+}
+
+export function validateISODuration(isoDuration: string) {
+  const duration = Duration.fromISO(isoDuration);
+  return duration.isValid;
+}
+
 function getStartTimeTransformations(
-  isoDuration: string
+  isoDuration: string,
 ): Array<RelativeTimeTransformation> {
   const duration = Duration.fromISO(isoDuration);
   const period = getSmallestUnit(duration);
@@ -141,7 +163,7 @@ function getStartTimeTransformations(
 }
 
 function getEndTimeTransformations(
-  isoDuration: string
+  isoDuration: string,
 ): Array<RelativeTimeTransformation> {
   const duration = Duration.fromISO(isoDuration);
   const period = getSmallestUnit(duration);
@@ -163,6 +185,17 @@ function getSmallestUnit(duration: Duration) {
   for (const { period, unit } of PeriodAndUnits) {
     if (duration[unit]) {
       return period;
+    }
+  }
+
+  return undefined;
+}
+
+function getLargestUnit(duration: Duration, units: DurationUnit[]) {
+  for (let i = PeriodAndUnits.length - 1; i >= 0; i--) {
+    const { unit } = PeriodAndUnits[i];
+    if (units.includes(unit) && duration[unit]) {
+      return unit;
     }
   }
 

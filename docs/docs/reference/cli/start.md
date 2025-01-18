@@ -13,27 +13,31 @@ rill start [<path>] [flags]
 ### Flags
 
 ```
-      --no-open             Do not open browser
-      --db string           Database DSN (default "main.db")
-      --db-driver string    Database driver (default "duckdb")
-      --port int            Port for HTTP (default 9009)
-      --port-grpc int       Port for gRPC (internal) (default 49009)
-      --readonly            Show only dashboards in UI
-      --no-ui               Serve only the backend
-      --verbose             Sets the log level to debug
-      --reset               Clear and re-ingest source data
-      --log-format string   Log format (options: "console", "json") (default "console")
-  -e, --env strings         Set project variables
+  -e, --env strings               Set environment variables
+      --environment string        Environment name (default "dev")
+      --reset                     Clear and re-ingest source data
+      --no-open                   Do not open browser
+      --verbose                   Sets the log level to debug
+      --port int                  Port for HTTP (default 9009)
+      --port-grpc int             Port for gRPC (internal) (default 49009)
+      --no-ui                     Serve only the backend
+      --debug                     Collect additional debug info
+      --log-format string         Log format (options: "console", "json") (default "console")
+      --tls-cert string           Path to TLS certificate
+      --tls-key string            Path to TLS key file
+      --allowed-origins strings   Override allowed origins for CORS
 ```
 
 ### Global flags
 
 ```
-  -h, --help          Print usage
-      --interactive   Prompt for missing required parameters (default true)
+      --api-token string   Token for authenticating with the cloud API
+      --format string      Output format (options: "human", "json", "csv") (default "human")
+  -h, --help               Print usage
+      --interactive        Prompt for missing required parameters (default true)
 ```
 
 ### SEE ALSO
 
-* [rill](cli.md)	 - Rill CLI
+* [rill](cli.md)	 - A CLI for Rill
 

@@ -6,10 +6,10 @@ import (
 	"os/signal"
 
 	"github.com/rilldata/rill/cli/cmd"
-	"github.com/rilldata/rill/cli/pkg/config"
+	"github.com/rilldata/rill/cli/pkg/cmdutil"
 )
 
-// Version details are set using -ldflags
+// Version details are set using -ldflags (...)
 var (
 	Version   string
 	Commit    string
@@ -17,7 +17,7 @@ var (
 )
 
 func main() {
-	ver := config.Version{
+	ver := cmdutil.Version{
 		Number:    Version,
 		Commit:    Commit,
 		Timestamp: BuildDate,

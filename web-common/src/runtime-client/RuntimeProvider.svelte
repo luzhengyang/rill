@@ -1,17 +1,21 @@
 <script lang="ts">
-  import { runtime } from "./runtime-store";
+  import { useQueryClient } from "@tanstack/svelte-query";
+  import { type AuthContext, runtime } from "./runtime-store";
+
+  const queryClient = useQueryClient();
 
   export let host: string;
   export let instanceId: string;
   export let jwt: string | undefined = undefined;
+  export let authContext: AuthContext;
 
-  $: runtime.set({
-    host: host,
-    instanceId: instanceId,
-    jwt: jwt,
-  });
+  $: runtime
+    .setRuntime(queryClient, host, instanceId, jwt, authContext)
+    .catch(console.error);
+
+  $: ({ host: _host, instanceId: _instanceId } = $runtime);
 </script>
 
-{#if $runtime.host !== undefined && $runtime.instanceId}
+{#if _host && _instanceId}
   <slot />
 {/if}

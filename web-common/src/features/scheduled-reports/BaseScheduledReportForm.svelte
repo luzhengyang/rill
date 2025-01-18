@@ -1,56 +1,62 @@
 <script lang="ts">
+  import MultiInput from "@rilldata/web-common/components/forms/MultiInput.svelte";
   import TimePicker from "@rilldata/web-common/components/forms/TimePicker.svelte";
+  import FormSection from "@rilldata/web-common/components/forms/FormSection.svelte";
+  import { getHasSlackConnection } from "@rilldata/web-common/features/alerts/delivery-tab/notifiers-utils";
+  import { useExploreValidSpec } from "@rilldata/web-common/features/explores/selectors";
+  import type { ReportValues } from "@rilldata/web-common/features/scheduled-reports/utils";
   import { V1ExportFormat } from "@rilldata/web-common/runtime-client";
-  import InputArray from "../../components/forms/InputArray.svelte";
-  import InputV2 from "../../components/forms/InputV2.svelte";
+  import type { Readable } from "svelte/store";
+  import type { SuperFormErrors } from "sveltekit-superforms/client";
+  import Input from "../../components/forms/Input.svelte";
   import Select from "../../components/forms/Select.svelte";
   import { runtime } from "../../runtime-client/runtime-store";
-  import { useDashboard } from "../dashboards/selectors";
   import { makeTimeZoneOptions } from "./time-utils";
 
   export let formId: string;
-  export let formState: any; // svelte-forms-lib's FormState
-  export let metricsViewName: string;
+  export let data: Readable<ReportValues>;
+  export let errors: SuperFormErrors<ReportValues>;
+  export let submit: () => void;
+  export let enhance;
+  export let exploreName: string;
 
-  const { form, errors, handleSubmit } = formState;
-
-  // There's a bug in how `svelte-forms-lib` types the `$errors` store for arrays.
-  // See: https://github.com/tjinauyeung/svelte-forms-lib/issues/154#issuecomment-1087331250
-  $: recipientErrors = $errors.recipients as unknown as { email: string }[];
+  $: ({ instanceId } = $runtime);
 
   // Pull the time zone options from the dashboard's spec
-  $: dashboard = useDashboard($runtime.instanceId, metricsViewName);
-  $: availableTimeZones =
-    $dashboard.data?.metricsView?.spec?.availableTimeZones;
+  $: exploreSpec = useExploreValidSpec(instanceId, exploreName);
+  $: availableTimeZones = $exploreSpec.data?.explore?.timeZones;
   $: timeZoneOptions = makeTimeZoneOptions(availableTimeZones);
+  $: hasSlackNotifier = getHasSlackConnection(instanceId);
 </script>
 
 <form
   autocomplete="off"
   class="flex flex-col gap-y-6"
   id={formId}
-  on:submit|preventDefault={handleSubmit}
+  on:submit|preventDefault={submit}
+  use:enhance
 >
   <span>Email recurring exports to recipients.</span>
-  <InputV2
-    bind:value={$form["title"]}
-    error={$errors["title"]}
+  <Input
+    bind:value={$data["title"]}
+    errors={$errors["title"]}
     id="title"
     label="Report title"
     placeholder="My report"
   />
   <div class="flex gap-x-2">
     <Select
-      bind:value={$form["frequency"]}
+      bind:value={$data["frequency"]}
       id="frequency"
       label="Frequency"
       options={["Daily", "Weekdays", "Weekly"].map((frequency) => ({
         value: frequency,
+        label: frequency,
       }))}
     />
-    {#if $form["frequency"] === "Weekly"}
+    {#if $data["frequency"] === "Weekly"}
       <Select
-        bind:value={$form["dayOfWeek"]}
+        bind:value={$data["dayOfWeek"]}
         id="dayOfWeek"
         label="Day"
         options={[
@@ -63,19 +69,20 @@
           "Sunday",
         ].map((day) => ({
           value: day,
+          label: day,
         }))}
       />
     {/if}
-    <TimePicker bind:value={$form["timeOfDay"]} id="timeOfDay" label="Time" />
+    <TimePicker bind:value={$data["timeOfDay"]} id="timeOfDay" label="Time" />
     <Select
-      bind:value={$form["timeZone"]}
+      bind:value={$data["timeZone"]}
       id="timeZone"
       label="Time zone"
       options={timeZoneOptions}
     />
   </div>
   <Select
-    bind:value={$form["exportFormat"]}
+    bind:value={$data["exportFormat"]}
     id="exportFormat"
     label="Format"
     options={[
@@ -84,40 +91,65 @@
       { value: V1ExportFormat.EXPORT_FORMAT_XLSX, label: "XLSX" },
     ]}
   />
-  <InputV2
-    bind:value={$form["exportLimit"]}
-    error={$errors["exportLimit"]}
+  <Input
+    bind:value={$data["exportLimit"]}
+    errors={$errors["exportLimit"]}
     id="exportLimit"
     label="Row limit"
     optional
     placeholder="1000"
   />
-  <InputArray
-    id="recipients"
-    label="Recipients"
-    bind:values={$form["recipients"]}
-    bind:errors={recipientErrors}
-    accessorKey="email"
+  <MultiInput
+    id="emailRecipients"
+    label="Email Recipients"
     hint="Recipients will receive different views based on their security policy.
-        Recipients without project access can't view the report."
+        Recipients without project access can only download the report."
+    bind:values={$data["emailRecipients"]}
+    errors={$errors["emailRecipients"]}
+    singular="email"
+    plural="emails"
     placeholder="Enter an email address"
-    addItemLabel="Add email"
-    on:add-item={() => {
-      $form["recipients"] = $form["recipients"].concat({ email: "" });
-      recipientErrors = recipientErrors.concat({ email: "" });
-
-      // Focus on the new input element
-      setTimeout(() => {
-        const input = document.getElementById(
-          `recipients.${$form["recipients"].length - 1}.email`
-        );
-        input?.focus();
-      }, 0);
-    }}
-    on:remove-item={(event) => {
-      const index = event.detail.index;
-      $form["recipients"] = $form["recipients"].filter((r, i) => i !== index);
-      recipientErrors = recipientErrors.filter((r, i) => i !== index);
-    }}
   />
+  {#if $hasSlackNotifier.data}
+    <FormSection
+      bind:enabled={$data["enableSlackNotification"]}
+      showSectionToggle
+      title="Slack notifications"
+      padding=""
+    >
+      <MultiInput
+        id="slackChannels"
+        label="Channels"
+        hint="We’ll send alerts directly to these channels."
+        bind:values={$data["slackChannels"]}
+        errors={$errors["slackChannels"]}
+        singular="channel"
+        plural="channels"
+        placeholder="# Enter a Slack channel name"
+      />
+      <MultiInput
+        id="slackUsers"
+        label="Users"
+        hint="We’ll alert them with direct messages in Slack."
+        bind:values={$data["slackUsers"]}
+        errors={$errors["slackUsers"]}
+        singular="user"
+        plural="users"
+        placeholder="Enter an email address"
+      />
+    </FormSection>
+  {:else}
+    <FormSection title="Slack notifications" padding="">
+      <svelte:fragment slot="description">
+        <span class="text-sm text-slate-600">
+          Slack has not been configured for this project. Read the <a
+            href="https://docs.rilldata.com/explore/alerts/slack"
+            target="_blank"
+          >
+            docs
+          </a> to learn more.
+        </span>
+      </svelte:fragment>
+    </FormSection>
+  {/if}
 </form>

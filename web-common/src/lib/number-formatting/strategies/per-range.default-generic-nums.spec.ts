@@ -1,6 +1,6 @@
+import { describe, expect, it } from "vitest";
 import { PerRangeFormatter } from "./per-range";
 import { defaultGenericNumOptions } from "./per-range-default-options";
-import { describe, it, expect } from "vitest";
 
 const defaultGenericNumTestCases: [number, string][] = [
   // integers
@@ -75,21 +75,18 @@ const defaultGenericNumTestCases: [number, string][] = [
   [0.095, "0.10"],
   [0.0095, "0.01"],
   [0.001, "1.0e-3"],
-  [0.00095, "950.0e-6"],
+  [0.00095, "9.5e-4"],
   [0.000999999, "1.0e-3"],
-  [0.00012335234, "123.4e-6"],
+  [0.00012335234, "1.2e-4"],
   [0.000_000_999999, "1.0e-6"],
-  [0.000_000_02341253, "23.4e-9"],
+  [0.000_000_02341253, "2.3e-8"],
   [0.000_000_000_999999, "1.0e-9"],
 ];
 
 describe("range formatter, using default options for generic nums, `.stringFormat()`", () => {
   defaultGenericNumTestCases.forEach(([input, output]) => {
     it(`returns the correct string in case: ${input}`, () => {
-      const formatter = new PerRangeFormatter(
-        [input],
-        defaultGenericNumOptions
-      );
+      const formatter = new PerRangeFormatter(defaultGenericNumOptions);
       expect(formatter.stringFormat(input)).toEqual(output);
     });
   });

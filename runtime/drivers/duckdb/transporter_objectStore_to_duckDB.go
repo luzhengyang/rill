@@ -37,7 +37,9 @@ func (t *objectStoreToDuckDB) Transfer(ctx context.Context, srcProps, sinkProps 
 		return err
 	}
 
-	t.logger.Info("source properties", zap.Any("srcProps", srcProps))
+	t.logger = t.logger.With(zap.String("source", sinkCfg.Table))
+
+	t.logger.Debug("source properties", zap.Any("srcProps", srcProps))
 	srcCfg, err := parseFileSourceProperties(srcProps)
 	if err != nil {
 		return err
@@ -49,17 +51,11 @@ func (t *objectStoreToDuckDB) Transfer(ctx context.Context, srcProps, sinkProps 
 	}
 	defer iterator.Close()
 
-	size, ok := iterator.Size(drivers.ProgressUnitByte)
-	if ok && !sizeWithinStorageLimits(t.to, size) {
-		return drivers.ErrStorageLimitExceeded
-	}
-
 	// if sql is specified use ast rewrite to fill in the downloaded files
 	if srcCfg.SQL != "" {
-		return t.ingestDuckDBSQL(ctx, srcCfg.SQL, iterator, srcCfg, sinkCfg, opts)
+		return t.ingestDuckDBSQL(ctx, srcCfg.SQL, iterator, srcCfg, sinkCfg)
 	}
 
-	opts.Progress.Target(size, drivers.ProgressUnitByte)
 	appendToTable := false
 	var format string
 	if srcCfg.Format != "" {
@@ -93,7 +89,7 @@ func (t *objectStoreToDuckDB) Transfer(ctx context.Context, srcProps, sinkProps 
 		}
 
 		st := time.Now()
-		t.logger.Info("ingesting files", zap.Strings("files", files), observability.ZapCtx(ctx))
+		t.logger.Debug("ingesting files", zap.Strings("files", files), observability.ZapCtx(ctx))
 		if appendToTable {
 			if err := a.appendData(ctx, files); err != nil {
 				return err
@@ -104,26 +100,24 @@ func (t *objectStoreToDuckDB) Transfer(ctx context.Context, srcProps, sinkProps 
 				return err
 			}
 
-			err = t.to.CreateTableAsSelect(ctx, sinkCfg.Table, false, fmt.Sprintf("SELECT * FROM %s", from))
+			err = t.to.CreateTableAsSelect(ctx, sinkCfg.Table, fmt.Sprintf("SELECT * FROM %s", from), &drivers.CreateTableOptions{})
 			if err != nil {
 				return err
 			}
 		}
 
 		size := fileSize(files)
-		t.logger.Info("ingested files", zap.Strings("files", files), zap.Int64("bytes_ingested", size), zap.Duration("duration", time.Since(st)), observability.ZapCtx(ctx))
-		opts.Progress.Observe(size, drivers.ProgressUnitByte)
+		t.logger.Debug("ingested files", zap.Strings("files", files), zap.Int64("bytes_ingested", size), zap.Duration("duration", time.Since(st)), observability.ZapCtx(ctx))
 		appendToTable = true
 	}
 	// convert to enum
 	if len(srcCfg.CastToENUM) > 0 {
-		conn, _ := t.to.(*connection)
-		return conn.convertToEnum(ctx, sinkCfg.Table, srcCfg.CastToENUM)
+		return fmt.Errorf("`cast_to_enum` is not implemented")
 	}
 	return nil
 }
 
-func (t *objectStoreToDuckDB) ingestDuckDBSQL(ctx context.Context, originalSQL string, iterator drivers.FileIterator, srcCfg *fileSourceProperties, dbSink *sinkProperties, opts *drivers.TransferOptions) error {
+func (t *objectStoreToDuckDB) ingestDuckDBSQL(ctx context.Context, originalSQL string, iterator drivers.FileIterator, srcCfg *fileSourceProperties, dbSink *sinkProperties) error {
 	ast, err := duckdbsql.Parse(originalSQL)
 	if err != nil {
 		return err
@@ -157,7 +151,7 @@ func (t *objectStoreToDuckDB) ingestDuckDBSQL(ctx context.Context, originalSQL s
 		}
 
 		st := time.Now()
-		t.logger.Info("ingesting files", zap.Strings("files", files), observability.ZapCtx(ctx))
+		t.logger.Debug("ingesting files", zap.Strings("files", files), observability.ZapCtx(ctx))
 		if appendToTable {
 			if err := a.appendData(ctx, files); err != nil {
 				return err
@@ -168,21 +162,19 @@ func (t *objectStoreToDuckDB) ingestDuckDBSQL(ctx context.Context, originalSQL s
 				return err
 			}
 
-			err = t.to.CreateTableAsSelect(ctx, dbSink.Table, false, sql)
+			err = t.to.CreateTableAsSelect(ctx, dbSink.Table, sql, &drivers.CreateTableOptions{})
 			if err != nil {
 				return err
 			}
 		}
 
 		size := fileSize(files)
-		t.logger.Info("ingested files", zap.Strings("files", files), zap.Int64("bytes_ingested", size), zap.Duration("duration", time.Since(st)), observability.ZapCtx(ctx))
-		opts.Progress.Observe(size, drivers.ProgressUnitByte)
+		t.logger.Debug("ingested files", zap.Strings("files", files), zap.Int64("bytes_ingested", size), zap.Duration("duration", time.Since(st)), observability.ZapCtx(ctx))
 		appendToTable = true
 	}
 	// convert to enum
 	if len(srcCfg.CastToENUM) > 0 {
-		conn, _ := t.to.(*connection)
-		return conn.convertToEnum(ctx, dbSink.Table, srcCfg.CastToENUM)
+		return fmt.Errorf("`cast_to_enum` is not implemented")
 	}
 	return nil
 }
@@ -213,7 +205,12 @@ func (a *appender) appendData(ctx context.Context, files []string) error {
 		return err
 	}
 
-	err = a.to.InsertTableAsSelect(ctx, a.sink.Table, a.allowSchemaRelaxation, sql)
+	opts := &drivers.InsertTableOptions{
+		ByName:   a.allowSchemaRelaxation,
+		InPlace:  true,
+		Strategy: drivers.IncrementalStrategyAppend,
+	}
+	err = a.to.InsertTableAsSelect(ctx, a.sink.Table, sql, opts)
 	if err == nil || !a.allowSchemaRelaxation || !containsAny(err.Error(), []string{"binder error", "conversion error"}) {
 		return err
 	}
@@ -224,7 +221,12 @@ func (a *appender) appendData(ctx context.Context, files []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to update schema %w", err)
 	}
-	return a.to.InsertTableAsSelect(ctx, a.sink.Table, true, sql)
+	opts = &drivers.InsertTableOptions{
+		ByName:   true,
+		InPlace:  true,
+		Strategy: drivers.IncrementalStrategyAppend,
+	}
+	return a.to.InsertTableAsSelect(ctx, a.sink.Table, sql, opts)
 }
 
 // updateSchema updates the schema of the table in case new file adds a new column or

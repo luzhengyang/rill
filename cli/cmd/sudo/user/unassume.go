@@ -16,37 +16,35 @@ func UnassumeCmd(ch *cmdutil.Helper) *cobra.Command {
 		Args:  cobra.NoArgs,
 		Short: "Revert a call to `assume`",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg := ch.Config
 			ctx := cmd.Context()
 
-			client, err := cmdutil.Client(cfg)
+			client, err := ch.Client()
 			if err != nil {
 				return err
 			}
-			defer client.Close()
 
+			// Fetch the original token
 			originalToken, err := dotrill.GetBackupToken()
 			if err != nil {
 				return err
 			}
-
 			if originalToken == "" {
 				return fmt.Errorf("Original token is not available, you are not assuming any user")
 			}
 
-			// Revoke current token if have original token
+			// Revoke current token
 			_, err = client.RevokeCurrentAuthToken(ctx, &adminv1.RevokeCurrentAuthTokenRequest{})
 			if err != nil {
 				fmt.Printf("Failed to revoke token (it may have expired). Clearing local token anyway.\n")
 			}
 
+			// Restore the original token as the access token
 			err = dotrill.SetAccessToken(originalToken)
 			if err != nil {
 				return err
 			}
-			cfg.AdminTokenDefault = originalToken
 
-			// Set original_token as empty
+			// Clear backup token
 			err = dotrill.SetBackupToken("")
 			if err != nil {
 				return err
@@ -58,8 +56,14 @@ func UnassumeCmd(ch *cmdutil.Helper) *cobra.Command {
 				return err
 			}
 
+			// Reload access tokens
+			err = ch.ReloadAdminConfig()
+			if err != nil {
+				return err
+			}
+
 			// Select org again for original user
-			err = auth.SelectOrgFlow(ctx, ch)
+			err = auth.SelectOrgFlow(ctx, ch, true)
 			if err != nil {
 				return err
 			}

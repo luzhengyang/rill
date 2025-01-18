@@ -1,16 +1,12 @@
-/** FIXME: there is another Debounce class in this codebase, but
- * it appears to run the first callback, not the last.
- */
-export function createDebouncer() {
+export const debounce = <F extends (...args: Parameters<F>) => ReturnType<F>>(
+  fn: F,
+  delay: number,
+) => {
   let timeout: ReturnType<typeof setTimeout>;
-  const callback = (callback: () => void, time: number) => {
-    if (timeout) {
-      clearTimeout(timeout);
-    }
-    timeout = setTimeout(callback, time);
-  };
-  callback.clear = () => {
+  return function (...args: Parameters<F>) {
     clearTimeout(timeout);
+    timeout = setTimeout(() => {
+      fn.apply(this, args);
+    }, delay);
   };
-  return callback;
-}
+};

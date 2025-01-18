@@ -1,10 +1,10 @@
 package project
 
 import (
-	"context"
 	"fmt"
 
 	"github.com/rilldata/rill/cli/pkg/cmdutil"
+	"github.com/rilldata/rill/cli/pkg/dotrillcloud"
 	adminv1 "github.com/rilldata/rill/proto/gen/rill/admin/v1"
 	"github.com/spf13/cobra"
 )
@@ -18,21 +18,19 @@ func DeleteCmd(ch *cmdutil.Helper) *cobra.Command {
 		Args:  cobra.MaximumNArgs(1),
 		Short: "Delete the project",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg := ch.Config
-			client, err := cmdutil.Client(cfg)
+			client, err := ch.Client()
 			if err != nil {
 				return err
 			}
-			defer client.Close()
 
 			if len(args) > 0 {
 				name = args[0]
 			}
 
-			if !cmd.Flags().Changed("project") && len(args) == 0 && cfg.Interactive {
-				name, err = inferProjectName(cmd.Context(), client, cfg.Org, path)
+			if !cmd.Flags().Changed("project") && len(args) == 0 && ch.Interactive {
+				name, err = ch.InferProjectName(cmd.Context(), ch.Org, path)
 				if err != nil {
-					return err
+					return fmt.Errorf("unable to infer project name (use `--project` to explicitly specify the name): %w", err)
 				}
 			}
 
@@ -41,7 +39,7 @@ func DeleteCmd(ch *cmdutil.Helper) *cobra.Command {
 			}
 
 			if !force {
-				ch.Printer.PrintlnWarn(fmt.Sprintf("Warn: Deleting the project %q will remove all metadata associated with the project", name))
+				ch.PrintfWarn("Warn: Deleting the project %q will remove all metadata associated with the project\n", name)
 
 				msg := fmt.Sprintf("Type %q to confirm deletion", name)
 				project, err := cmdutil.InputPrompt(msg, "")
@@ -54,15 +52,26 @@ func DeleteCmd(ch *cmdutil.Helper) *cobra.Command {
 				}
 			}
 
-			_, err = client.DeleteProject(context.Background(), &adminv1.DeleteProjectRequest{
-				OrganizationName: cfg.Org,
+			delResp, err := client.DeleteProject(cmd.Context(), &adminv1.DeleteProjectRequest{
+				OrganizationName: ch.Org,
 				Name:             name,
 			})
 			if err != nil {
 				return err
 			}
 
-			ch.Printer.PrintlnSuccess(fmt.Sprintf("Deleted project: %v", name))
+			rc, err := dotrillcloud.GetAll(path, ch.AdminURL())
+			if err != nil {
+				return err
+			}
+			if rc != nil && rc.ProjectID == delResp.Id {
+				err = dotrillcloud.Delete(path, ch.AdminURL())
+				if err != nil {
+					return err
+				}
+			}
+
+			ch.PrintfSuccess("Deleted project: %v\n", name)
 			return nil
 		},
 	}

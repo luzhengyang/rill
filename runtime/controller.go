@@ -14,15 +14,12 @@ import (
 	"github.com/rilldata/rill/runtime/drivers"
 	"github.com/rilldata/rill/runtime/pkg/activity"
 	"github.com/rilldata/rill/runtime/pkg/dag"
-	"github.com/rilldata/rill/runtime/pkg/logbuffer"
-	"github.com/rilldata/rill/runtime/pkg/logutil"
+	"github.com/rilldata/rill/runtime/pkg/graceful"
 	"github.com/rilldata/rill/runtime/pkg/schedule"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
-	"go.uber.org/zap/exp/zapslog"
 	"golang.org/x/exp/maps"
-	"golang.org/x/exp/slog"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -61,7 +58,7 @@ var ReconcilerInitializers = make(map[string]ReconcilerInitializer)
 // RegisterReconciler registers a reconciler initializer for a specific resource kind
 func RegisterReconcilerInitializer(resourceKind string, initializer ReconcilerInitializer) {
 	if ReconcilerInitializers[resourceKind] != nil {
-		panic(fmt.Errorf("reconciler already registered for resource kind %q", resourceKind))
+		panic(fmt.Errorf("reconciler already registered for resource type %q", resourceKind))
 	}
 	ReconcilerInitializers[resourceKind] = initializer
 }
@@ -71,9 +68,8 @@ func RegisterReconcilerInitializer(resourceKind string, initializer ReconcilerIn
 type Controller struct {
 	Runtime     *Runtime
 	InstanceID  string
-	Logger      *slog.Logger
-	Activity    activity.Client
-	Logs        *logbuffer.Buffer
+	Logger      *zap.Logger
+	Activity    *activity.Client
 	mu          sync.RWMutex
 	reconcilers map[string]Reconciler
 	catalog     *catalogCache
@@ -100,10 +96,11 @@ type Controller struct {
 }
 
 // NewController creates a new Controller
-func NewController(ctx context.Context, rt *Runtime, instanceID string, logger *zap.Logger, ac activity.Client) (*Controller, error) {
+func NewController(ctx context.Context, rt *Runtime, instanceID string, logger *zap.Logger, ac *activity.Client) (*Controller, error) {
 	c := &Controller{
 		Runtime:        rt,
 		InstanceID:     instanceID,
+		Logger:         logger,
 		Activity:       ac,
 		closedCh:       make(chan struct{}),
 		reconcilers:    make(map[string]Reconciler),
@@ -115,16 +112,6 @@ func NewController(ctx context.Context, rt *Runtime, instanceID string, logger *
 		invocations:    make(map[string]*invocation),
 		completed:      make(chan *invocation),
 	}
-
-	// Hacky way to customize the logger for local vs. hosted
-	// TODO: Setup the logger to duplicate logs to a) the Zap logger, b) an in-memory buffer that exposes the logs over the API
-	if !rt.AllowHostAccess() {
-		logger = logger.With(zap.String("instance_id", instanceID))
-		logger = logger.Named("console")
-	}
-
-	c.Logs = logbuffer.NewBuffer(rt.opts.ControllerLogBufferCapacity, rt.opts.ControllerLogBufferSizeBytes)
-	c.Logger = slog.New(logutil.NewDuplicatingHandler(zapslog.HandlerOptions{LoggerName: "console"}.New(logger.Core()), c.Logs))
 
 	cc, err := newCatalogCache(ctx, c, c.InstanceID)
 	if err != nil {
@@ -226,11 +213,16 @@ func (c *Controller) Run(ctx context.Context) error {
 			resetTimelineTimer()
 			c.mu.Unlock()
 		case <-flushTicker.C: // It's time to flush the catalog to persistent storage
+			// Add a minimum duration to the ctx to reduce the chance of an interrupted flush.
+			ctx, cancel := graceful.WithMinimumDuration(ctx, 10*time.Second)
 			c.mu.RLock()
 			err := c.catalog.flush(ctx)
+			cancel()
 			c.mu.RUnlock()
 			if err != nil {
-				loopErr = err
+				if !errors.Is(err, ctx.Err()) {
+					loopErr = err
+				}
 				stop = true
 			}
 		case <-hangingTicker.C: // It's time to check for hanging canceled reconciles
@@ -302,7 +294,7 @@ func (c *Controller) Run(ctx context.Context) error {
 			c.mu.Lock()
 			err := c.processCompletedInvocation(inv)
 			if err != nil {
-				c.Logger.Warn("failed to process completed invocation during shutdown", slog.Any("error", err))
+				c.Logger.Warn("failed to process completed invocation during shutdown", zap.Any("error", err))
 			}
 			c.mu.Unlock()
 		case <-ctx.Done():
@@ -351,7 +343,7 @@ func (c *Controller) Run(ctx context.Context) error {
 	c.mu.Unlock()
 
 	if closeErr != nil {
-		c.Logger.Error("controller closed with error", slog.Any("error", closeErr))
+		c.Logger.Error("controller closed with error", zap.Any("error", closeErr))
 	}
 	closeErr = errors.Join(loopCtxErr, closeErr)
 	return closeErr
@@ -407,7 +399,7 @@ func (c *Controller) Get(ctx context.Context, name *runtimev1.ResourceName, clon
 // List returns a list of resources of the specified kind.
 // If kind is empty, all resources are returned.
 // Soft-deleted resources (i.e. resources where DeletedOn != nil) are not returned.
-func (c *Controller) List(ctx context.Context, kind string, clone bool) ([]*runtimev1.Resource, error) {
+func (c *Controller) List(ctx context.Context, kind, path string, clone bool) ([]*runtimev1.Resource, error) {
 	ctx, span := tracer.Start(ctx, "Controller.List", trace.WithAttributes(attribute.String("instance_id", c.InstanceID), attribute.String("kind", kind)))
 	defer span.End()
 	if err := c.checkRunning(); err != nil {
@@ -418,7 +410,7 @@ func (c *Controller) List(ctx context.Context, kind string, clone bool) ([]*runt
 	}
 	c.lock(ctx, true)
 	defer c.unlock(ctx, true)
-	return c.catalog.list(kind, false, clone)
+	return c.catalog.list(kind, path, false, clone), nil
 }
 
 // SubscribeCallback is the callback type passed to Subscribe.
@@ -505,7 +497,7 @@ func (c *Controller) UpdateMeta(ctx context.Context, name *runtimev1.ResourceNam
 	defer c.unlock(ctx, false)
 
 	if !c.isReconcilerForResource(ctx, name) {
-		c.cancelIfRunning(name, false)
+		c.cancelIfRunning(name)
 		c.enqueue(name)
 	}
 
@@ -541,7 +533,7 @@ func (c *Controller) UpdateName(ctx context.Context, name, newName, owner *runti
 	defer c.unlock(ctx, false)
 
 	if !c.isReconcilerForResource(ctx, name) {
-		c.cancelIfRunning(name, false)
+		c.cancelIfRunning(name)
 		c.enqueue(name)
 	}
 
@@ -592,7 +584,7 @@ func (c *Controller) UpdateSpec(ctx context.Context, name *runtimev1.ResourceNam
 	defer c.unlock(ctx, false)
 
 	if !c.isReconcilerForResource(ctx, name) {
-		c.cancelIfRunning(name, false)
+		c.cancelIfRunning(name)
 		c.enqueue(name)
 	}
 
@@ -665,7 +657,7 @@ func (c *Controller) Delete(ctx context.Context, name *runtimev1.ResourceName) e
 	c.lock(ctx, false)
 	defer c.unlock(ctx, false)
 
-	c.cancelIfRunning(name, false)
+	c.cancelIfRunning(name)
 
 	// Check resource exists (otherwise, DAG lookup may panic)
 	_, err := c.catalog.get(name, false, false)
@@ -751,7 +743,7 @@ func (c *Controller) Cancel(ctx context.Context, name *runtimev1.ResourceName) e
 	}
 	c.lock(ctx, false)
 	defer c.unlock(ctx, false)
-	c.cancelIfRunning(name, false)
+	c.cancelIfRunning(name)
 	return nil
 }
 
@@ -814,7 +806,7 @@ func (c *Controller) reconciler(resourceKind string) Reconciler {
 
 	initializer := ReconcilerInitializers[resourceKind]
 	if initializer == nil {
-		panic(fmt.Errorf("no reconciler registered for resource kind %q", resourceKind))
+		panic(fmt.Errorf("no reconciler registered for resource type %q", resourceKind))
 	}
 
 	reconciler = initializer(c)
@@ -1122,7 +1114,7 @@ func (c *Controller) markPending(n *runtimev1.ResourceName) (skip bool, err erro
 			return false, err
 		}
 		if !r.Meta.Hidden {
-			logArgs := []any{slog.String("name", n.Name), slog.String("kind", unqualifiedKind(n.Kind)), slog.Any("error", errCyclicDependency)}
+			logArgs := []zap.Field{zap.String("name", n.Name), zap.String("type", PrettifyResourceKind(n.Kind)), zap.Any("error", errCyclicDependency)}
 			c.Logger.Warn("Skipping resource", logArgs...)
 		}
 		return true, nil
@@ -1217,6 +1209,19 @@ func (c *Controller) trySchedule(n *runtimev1.ResourceName) (success bool, err e
 		}
 	}
 
+	// If the resource was renamed and an invocation for its former name is currently running, it means the resource was renamed while it was reconciling.
+	// It is not possible that the running invocation is for a new resource because we always run rename reconciles before regular reconciles.
+	// It is also not possible that the running invocation is for another renamed resource because safeRename turns such cases into creates.
+	//
+	// In this case, we add the new name to the waitlist of the running invocation and return true.
+	if r.Meta.RenamedFrom != nil {
+		inv, ok := c.invocations[nameStr(r.Meta.RenamedFrom)]
+		if ok {
+			inv.addToWaitlist(n, r.Meta.SpecVersion)
+			return true, nil
+		}
+	}
+
 	// We want deletes to run before renames or regular reconciles.
 	// And we want renames to run before regular reconciles.
 	// Return false if there are deleted or renamed resources, and this isn't one of them.
@@ -1263,12 +1268,12 @@ func (c *Controller) invoke(r *runtimev1.Resource) error {
 
 	// Log invocation
 	if !inv.isHidden {
-		logArgs := []any{slog.String("name", n.Name), slog.String("kind", unqualifiedKind(n.Kind))}
+		logArgs := []zap.Field{zap.String("name", n.Name), zap.String("type", PrettifyResourceKind(n.Kind))}
 		if inv.isDelete {
-			logArgs = append(logArgs, slog.Bool("deleted", inv.isDelete))
+			logArgs = append(logArgs, zap.Bool("deleted", inv.isDelete))
 		}
 		if inv.isRename {
-			logArgs = append(logArgs, slog.String("renamed_from", r.Meta.RenamedFrom.Name))
+			logArgs = append(logArgs, zap.String("renamed_from", r.Meta.RenamedFrom.Name))
 		}
 		c.Logger.Info("Reconciling resource", logArgs...)
 	}
@@ -1282,7 +1287,7 @@ func (c *Controller) invoke(r *runtimev1.Resource) error {
 			if r := recover(); r != nil {
 				stack := make([]byte, 64<<10)
 				stack = stack[:runtime.Stack(stack, false)]
-				c.Logger.Error("panic in reconciler", slog.String("name", n.Name), slog.String("kind", n.Kind), slog.Any("error", r), slog.String("stack", string(stack)))
+				c.Logger.Error("panic in reconciler", zap.String("name", n.Name), zap.String("type", n.Kind), zap.Any("error", r), zap.String("stack", string(stack)))
 
 				inv.result = ReconcileResult{Err: fmt.Errorf("panic: %v", r)}
 				if inv.holdsLock {
@@ -1299,7 +1304,7 @@ func (c *Controller) invoke(r *runtimev1.Resource) error {
 		tracerAttrs := []attribute.KeyValue{
 			attribute.String("instance_id", c.InstanceID),
 			attribute.String("name", n.Name),
-			attribute.String("kind", unqualifiedKind(n.Kind)),
+			attribute.String("type", PrettifyResourceKind(n.Kind)),
 		}
 		if inv.isDelete {
 			tracerAttrs = append(tracerAttrs, attribute.Bool("deleted", inv.isDelete))
@@ -1330,23 +1335,23 @@ func (c *Controller) processCompletedInvocation(inv *invocation) error {
 	delete(c.invocations, nameStr(inv.name))
 
 	// Log result
-	logArgs := []any{
-		slog.String("name", inv.name.Name),
-		slog.String("kind", unqualifiedKind(inv.name.Kind)),
+	logArgs := []zap.Field{
+		zap.String("name", inv.name.Name),
+		zap.String("type", PrettifyResourceKind(inv.name.Kind)),
 	}
 	elapsed := time.Since(inv.startedOn).Round(time.Millisecond)
 	if elapsed > 0 {
-		logArgs = append(logArgs, slog.Duration("elapsed", elapsed))
+		logArgs = append(logArgs, zap.Duration("elapsed", elapsed))
 	}
 	if !inv.result.Retrigger.IsZero() {
-		logArgs = append(logArgs, slog.String("retrigger_on", inv.result.Retrigger.Format(time.RFC3339)))
+		logArgs = append(logArgs, zap.String("retrigger_on", inv.result.Retrigger.Format(time.RFC3339)))
 	}
 	if !inv.cancelledOn.IsZero() {
-		logArgs = append(logArgs, slog.Bool("cancelled", true))
+		logArgs = append(logArgs, zap.Bool("cancelled", true))
 	}
 	errorLevel := false
 	if inv.result.Err != nil && !errors.Is(inv.result.Err, context.Canceled) {
-		logArgs = append(logArgs, slog.Any("error", inv.result.Err))
+		logArgs = append(logArgs, zap.Any("error", inv.result.Err))
 		errorLevel = true
 	}
 	if errorLevel {
@@ -1355,20 +1360,41 @@ func (c *Controller) processCompletedInvocation(inv *invocation) error {
 		c.Logger.Info("Reconciled resource", logArgs...)
 	}
 
+	// Emit event unless it was a cancellation.
+	if inv.cancelledOn.IsZero() {
+		eventArgs := []attribute.KeyValue{
+			attribute.String("name", inv.name.Name),
+			attribute.String("type", PrettifyResourceKind(inv.name.Kind)),
+			attribute.Int64("elapsed_ms", elapsed.Milliseconds()),
+		}
+		if inv.isDelete {
+			eventArgs = append(eventArgs, attribute.Bool("deleted", true))
+		}
+		if inv.isRename {
+			eventArgs = append(eventArgs, attribute.Bool("renamed", true))
+		}
+		if inv.result.Err != nil {
+			eventArgs = append(eventArgs, attribute.String("error", inv.result.Err.Error()))
+		}
+		c.Activity.Record(context.Background(), activity.EventTypeLog, "reconciled_resource", eventArgs...)
+	}
+
 	r, err := c.catalog.get(inv.name, true, false)
 	if err != nil {
-		// Self-deletes are immediately hard deletes. So only return the error if it's not a self-delete.
-		if !(inv.deletedSelf && errors.Is(err, drivers.ErrResourceNotFound)) {
+		if !errors.Is(err, drivers.ErrResourceNotFound) {
 			return err
 		}
+		// There are two cases where the resource no longer exists:
+		// 1. Self-deletes, which are immediately hard deletes.
+		// 2. When a resource was renamed while reconciling.
 	}
-	// NOTE: Due to self-deletes, r may be nil!
+	// NOTE: Due to self-deletes and renames, r may be nil!
 
 	if inv.isDelete {
 		// Extra checks in case item was re-created during deletion, or deleted during a normal reconciling (in which case this is just a cancellation of the normal reconcile, not the result of deletion)
 		if r != nil && r.Meta.DeletedOn != nil && inv.cancelledOn.IsZero() {
 			if inv.result.Err != nil {
-				c.Logger.Error("got error while deleting resource", slog.String("name", nameStr(r.Meta.Name)), slog.Any("error", inv.result.Err))
+				c.Logger.Error("got error while deleting resource", zap.String("name", nameStr(r.Meta.Name)), zap.Any("error", inv.result.Err))
 			}
 
 			err = c.catalog.delete(r.Meta.Name)
@@ -1445,7 +1471,7 @@ func (c *Controller) processCompletedInvocation(inv *invocation) error {
 
 	// Re-enqueue children if:
 	if !inv.reschedule && // Not rescheduling  (since then the children would be blocked anyway)
-		r != nil && // Not a hard delete (children were already enqueued when the soft delete happened)
+		r != nil && // Not a hard delete or cancelled due to rename (children were already enqueued when the soft delete or rename happened)
 		r.Meta.DeletedOn == nil && // Not a soft delete (children were already enqueued when c.Delete(...) was called)
 		!c.catalog.isCyclic(inv.name) && // Hasn't become cyclic (since DAG access is not safe for cyclic names)
 		true {
@@ -1460,10 +1486,10 @@ func (c *Controller) processCompletedInvocation(inv *invocation) error {
 // cancelIfRunning cancels a running invocation for the resource.
 // It does nothing if no invocation is running for the resource.
 // It must be called while c.mu is held.
-func (c *Controller) cancelIfRunning(n *runtimev1.ResourceName, reschedule bool) {
+func (c *Controller) cancelIfRunning(n *runtimev1.ResourceName) {
 	inv, ok := c.invocations[nameStr(n)]
 	if ok {
-		inv.cancel(reschedule)
+		inv.cancel(false)
 	}
 }
 
@@ -1529,16 +1555,4 @@ func invocationFromContext(ctx context.Context) *invocation {
 		return inv.(*invocation)
 	}
 	return nil
-}
-
-// unqualifiedKind removes the protobuf package name from a kind.
-// E.g. "rill.runtime.v1.Source" -> "Source".
-func unqualifiedKind(k string) string {
-	idx := strings.LastIndex(k, ".")
-	if idx >= 0 {
-		k = k[idx+1:]
-	}
-	// TEMP: Trim the "V2" suffix. TODO: Remove when dropping the suffixes.
-	k = strings.TrimSuffix(k, "V2")
-	return k
 }

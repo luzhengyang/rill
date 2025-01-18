@@ -5,31 +5,31 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	runtimev1 "github.com/rilldata/rill/proto/gen/rill/runtime/v1"
 	"github.com/rilldata/rill/runtime"
 	"github.com/rilldata/rill/runtime/drivers"
+	"github.com/rilldata/rill/runtime/metricsview"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type MetricsViewToplist struct {
-	MetricsViewName    string                               `json:"metrics_view_name,omitempty"`
-	DimensionName      string                               `json:"dimension_name,omitempty"`
-	MeasureNames       []string                             `json:"measure_names,omitempty"`
-	InlineMeasures     []*runtimev1.InlineMeasure           `json:"inline_measures,omitempty"`
-	TimeStart          *timestamppb.Timestamp               `json:"time_start,omitempty"`
-	TimeEnd            *timestamppb.Timestamp               `json:"time_end,omitempty"`
-	Limit              *int64                               `json:"limit,omitempty"`
-	Offset             int64                                `json:"offset,omitempty"`
-	Sort               []*runtimev1.MetricsViewSort         `json:"sort,omitempty"`
-	Where              *runtimev1.Expression                `json:"where,omitempty"`
-	Having             *runtimev1.Expression                `json:"having,omitempty"`
-	MetricsView        *runtimev1.MetricsViewSpec           `json:"-"`
-	ResolvedMVSecurity *runtime.ResolvedMetricsViewSecurity `json:"security"`
-
-	// backwards compatibility
-	Filter *runtimev1.MetricsViewFilter `json:"filter,omitempty"`
+	MetricsViewName string                       `json:"metrics_view_name,omitempty"`
+	DimensionName   string                       `json:"dimension_name,omitempty"`
+	MeasureNames    []string                     `json:"measure_names,omitempty"`
+	TimeStart       *timestamppb.Timestamp       `json:"time_start,omitempty"`
+	TimeEnd         *timestamppb.Timestamp       `json:"time_end,omitempty"`
+	Limit           *int64                       `json:"limit,omitempty"`
+	Offset          int64                        `json:"offset,omitempty"`
+	Sort            []*runtimev1.MetricsViewSort `json:"sort,omitempty"`
+	Where           *runtimev1.Expression        `json:"where,omitempty"`
+	WhereSQL        string                       `json:"where_sql,omitempty"`
+	Filter          *runtimev1.MetricsViewFilter `json:"filter,omitempty"` // backwards compatibility
+	Having          *runtimev1.Expression        `json:"having,omitempty"`
+	HavingSQL       string                       `json:"having_sql,omitempty"`
+	SecurityClaims  *runtime.SecurityClaims      `json:"security_claims,omitempty"`
 
 	Result *runtimev1.MetricsViewToplistResponse `json:"-"`
 }
@@ -67,222 +67,158 @@ func (q *MetricsViewToplist) UnmarshalResult(v any) error {
 }
 
 func (q *MetricsViewToplist) Resolve(ctx context.Context, rt *runtime.Runtime, instanceID string, priority int) error {
-	olap, release, err := rt.OLAP(ctx, instanceID)
+	mv, security, err := resolveMVAndSecurityFromAttributes(ctx, rt, instanceID, q.MetricsViewName, q.SecurityClaims)
 	if err != nil {
 		return err
 	}
-	defer release()
 
-	if olap.Dialect() != drivers.DialectDuckDB && olap.Dialect() != drivers.DialectDruid {
-		return fmt.Errorf("not available for dialect '%s'", olap.Dialect())
-	}
-
-	if q.MetricsView.TimeDimension == "" && (q.TimeStart != nil || q.TimeEnd != nil) {
-		return fmt.Errorf("metrics view '%s' does not have a time dimension", q.MetricsViewName)
-	}
-
-	// backwards compatibility
-	if q.Filter != nil {
-		if q.Where != nil {
-			return fmt.Errorf("both filter and where is provided")
-		}
-		q.Where = convertFilterToExpression(q.Filter)
-	}
-
-	// Build query
-	sql, args, err := q.buildMetricsTopListSQL(q.MetricsView, olap.Dialect(), q.ResolvedMVSecurity)
+	qry, err := q.rewriteToMetricsViewQuery(false)
 	if err != nil {
-		return fmt.Errorf("error building query: %w", err)
+		return fmt.Errorf("error rewriting to metrics query: %w", err)
 	}
 
-	// Execute
-	meta, data, err := metricsQuery(ctx, olap, priority, sql, args)
+	e, err := metricsview.NewExecutor(ctx, rt, instanceID, mv.ValidSpec, mv.Streaming, security, priority)
+	if err != nil {
+		return err
+	}
+	defer e.Close()
+
+	res, err := e.Query(ctx, qry, nil)
+	if err != nil {
+		return err
+	}
+	defer res.Close()
+
+	data, err := rowsToData(res)
 	if err != nil {
 		return err
 	}
 
 	q.Result = &runtimev1.MetricsViewToplistResponse{
-		Meta: meta,
+		Meta: structTypeToMetricsViewColumn(res.Schema),
 		Data: data,
 	}
-
 	return nil
 }
 
 func (q *MetricsViewToplist) Export(ctx context.Context, rt *runtime.Runtime, instanceID string, w io.Writer, opts *runtime.ExportOptions) error {
-	olap, release, err := rt.OLAP(ctx, instanceID)
-	if err != nil {
-		return err
-	}
-	defer release()
-
-	switch olap.Dialect() {
-	case drivers.DialectDuckDB:
-		if opts.Format == runtimev1.ExportFormat_EXPORT_FORMAT_CSV || opts.Format == runtimev1.ExportFormat_EXPORT_FORMAT_PARQUET {
-			if q.MetricsView.TimeDimension == "" && (q.TimeStart != nil || q.TimeEnd != nil) {
-				return fmt.Errorf("metrics view '%s' does not have a time dimension", q.MetricsViewName)
-			}
-
-			sql, args, err := q.buildMetricsTopListSQL(q.MetricsView, olap.Dialect(), q.ResolvedMVSecurity)
-			if err != nil {
-				return err
-			}
-
-			filename := q.generateFilename(q.MetricsView)
-			if err := duckDBCopyExport(ctx, w, opts, sql, args, filename, olap, opts.Format); err != nil {
-				return err
-			}
-		} else {
-			if err := q.generalExport(ctx, rt, instanceID, w, opts, olap, q.MetricsView); err != nil {
-				return err
-			}
-		}
-	case drivers.DialectDruid:
-		if err := q.generalExport(ctx, rt, instanceID, w, opts, olap, q.MetricsView); err != nil {
-			return err
-		}
-	default:
-		return fmt.Errorf("not available for dialect '%s'", olap.Dialect())
-	}
-
-	return nil
-}
-
-func (q *MetricsViewToplist) generalExport(ctx context.Context, rt *runtime.Runtime, instanceID string, w io.Writer, opts *runtime.ExportOptions, olap drivers.OLAPStore, mv *runtimev1.MetricsViewSpec) error {
-	err := q.Resolve(ctx, rt, instanceID, opts.Priority)
+	mv, security, err := resolveMVAndSecurityFromAttributes(ctx, rt, instanceID, q.MetricsViewName, q.SecurityClaims)
 	if err != nil {
 		return err
 	}
 
-	if opts.PreWriteHook != nil {
-		err = opts.PreWriteHook(q.generateFilename(mv))
-		if err != nil {
-			return err
-		}
+	qry, err := q.rewriteToMetricsViewQuery(true)
+	if err != nil {
+		return fmt.Errorf("error rewriting to metrics query: %w", err)
 	}
 
+	e, err := metricsview.NewExecutor(ctx, rt, instanceID, mv.ValidSpec, mv.Streaming, security, opts.Priority)
+	if err != nil {
+		return err
+	}
+	defer e.Close()
+
+	var format drivers.FileFormat
 	switch opts.Format {
-	case runtimev1.ExportFormat_EXPORT_FORMAT_UNSPECIFIED:
-		return fmt.Errorf("unspecified format")
 	case runtimev1.ExportFormat_EXPORT_FORMAT_CSV:
-		return writeCSV(q.Result.Meta, q.Result.Data, w)
+		format = drivers.FileFormatCSV
 	case runtimev1.ExportFormat_EXPORT_FORMAT_XLSX:
-		return writeXLSX(q.Result.Meta, q.Result.Data, w)
+		format = drivers.FileFormatXLSX
 	case runtimev1.ExportFormat_EXPORT_FORMAT_PARQUET:
-		return writeParquet(q.Result.Meta, q.Result.Data, w)
+		format = drivers.FileFormatParquet
+	default:
+		return fmt.Errorf("unsupported format: %s", opts.Format.String())
+	}
+
+	path, err := e.Export(ctx, qry, nil, format)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(path) }()
+
+	filename := q.generateFilename()
+	err = opts.PreWriteHook(filename)
+	if err != nil {
+		return err
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	_, err = io.Copy(w, f)
+	if err != nil {
+		return err
 	}
 
 	return nil
 }
 
-func (q *MetricsViewToplist) generateFilename(mv *runtimev1.MetricsViewSpec) string {
+func (q *MetricsViewToplist) rewriteToMetricsViewQuery(export bool) (*metricsview.Query, error) {
+	qry := &metricsview.Query{MetricsView: q.MetricsViewName}
+
+	qry.Dimensions = append(qry.Dimensions, metricsview.Dimension{Name: q.DimensionName})
+
+	for _, m := range q.MeasureNames {
+		qry.Measures = append(qry.Measures, metricsview.Measure{Name: m})
+	}
+
+	if q.TimeStart != nil || q.TimeEnd != nil {
+		res := &metricsview.TimeRange{}
+		if q.TimeStart != nil {
+			res.Start = q.TimeStart.AsTime()
+		}
+		if q.TimeEnd != nil {
+			res.End = q.TimeEnd.AsTime()
+		}
+		qry.TimeRange = res
+	}
+
+	if q.Limit != nil {
+		qry.Limit = q.Limit
+	}
+
+	if q.Offset != 0 {
+		qry.Offset = &q.Offset
+	}
+
+	for _, s := range q.Sort {
+		qry.Sort = append(qry.Sort, metricsview.Sort{
+			Name: s.Name,
+			Desc: !s.Ascending,
+		})
+	}
+
+	if q.Filter != nil { // Backwards compatibility
+		if q.Where != nil {
+			return nil, fmt.Errorf("both filter and where is provided")
+		}
+		q.Where = convertFilterToExpression(q.Filter)
+	}
+
+	var err error
+	qry.Where, err = metricViewExpression(q.Where, q.WhereSQL)
+	if err != nil {
+		return nil, fmt.Errorf("error converting where clause: %w", err)
+	}
+
+	qry.Having, err = metricViewExpression(q.Having, q.HavingSQL)
+	if err != nil {
+		return nil, fmt.Errorf("error converting having clause: %w", err)
+	}
+
+	qry.UseDisplayNames = export
+
+	return qry, nil
+}
+
+func (q *MetricsViewToplist) generateFilename() string {
 	filename := strings.ReplaceAll(q.MetricsViewName, `"`, `_`)
 	filename += "_" + q.DimensionName
 	if q.TimeStart != nil || q.TimeEnd != nil || q.Where != nil || q.Having != nil {
 		filename += "_filtered"
 	}
 	return filename
-}
-
-func (q *MetricsViewToplist) buildMetricsTopListSQL(mv *runtimev1.MetricsViewSpec, dialect drivers.Dialect, policy *runtime.ResolvedMetricsViewSecurity) (string, []any, error) {
-	ms, err := resolveMeasures(mv, q.InlineMeasures, q.MeasureNames)
-	if err != nil {
-		return "", nil, err
-	}
-
-	dim, err := metricsViewDimension(mv, q.DimensionName)
-	if err != nil {
-		return "", nil, err
-	}
-	rawColName := metricsViewDimensionColumn(dim)
-	colName := safeName(rawColName)
-	unnestColName := safeName(tempName(fmt.Sprintf("%s_%s_", "unnested", rawColName)))
-
-	var selectCols []string
-	unnestClause := ""
-	if dim.Unnest && dialect != drivers.DialectDruid {
-		// select "unnested_colName" as "colName" ... FROM "mv_table", LATERAL UNNEST("mv_table"."colName") tbl("unnested_colName") ...
-		selectCols = append(selectCols, fmt.Sprintf(`%s as %s`, unnestColName, colName))
-		unnestClause = fmt.Sprintf(`, LATERAL UNNEST(%s.%s) tbl(%s)`, safeName(mv.Table), colName, unnestColName)
-	} else {
-		selectCols = append(selectCols, colName)
-	}
-
-	for _, m := range ms {
-		expr := fmt.Sprintf(`%s as "%s"`, m.Expression, m.Name)
-		selectCols = append(selectCols, expr)
-	}
-
-	whereClause := "1=1"
-	args := []any{}
-	if mv.TimeDimension != "" {
-		if q.TimeStart != nil {
-			whereClause += fmt.Sprintf(" AND %s >= ?", safeName(mv.TimeDimension))
-			args = append(args, q.TimeStart.AsTime())
-		}
-		if q.TimeEnd != nil {
-			whereClause += fmt.Sprintf(" AND %s < ?", safeName(mv.TimeDimension))
-			args = append(args, q.TimeEnd.AsTime())
-		}
-	}
-
-	if q.Where != nil {
-		clause, clauseArgs, err := buildExpression(mv, q.Where, nil, dialect)
-		if err != nil {
-			return "", nil, err
-		}
-		whereClause += " AND " + clause
-		args = append(args, clauseArgs...)
-	}
-
-	havingClause := ""
-	if q.Having != nil {
-		var havingClauseArgs []any
-		havingClause, havingClauseArgs, err = buildExpression(mv, q.Having, nil, dialect)
-		if err != nil {
-			return "", nil, err
-		}
-		havingClause = "HAVING " + havingClause
-		args = append(args, havingClauseArgs...)
-	}
-
-	sortingCriteria := make([]string, 0, len(q.Sort))
-	for _, s := range q.Sort {
-		sortCriterion := safeName(s.Name)
-		if !s.Ascending {
-			sortCriterion += " DESC"
-		}
-		if dialect == drivers.DialectDuckDB {
-			sortCriterion += " NULLS LAST"
-		}
-		sortingCriteria = append(sortingCriteria, sortCriterion)
-	}
-	orderClause := ""
-	if len(sortingCriteria) > 0 {
-		orderClause = "ORDER BY " + strings.Join(sortingCriteria, ", ")
-	}
-
-	var limitClause string
-	if q.Limit != nil {
-		limitClause = fmt.Sprintf("LIMIT %d", *q.Limit)
-	}
-
-	groupByCol := colName
-	if dim.Unnest && dialect != drivers.DialectDruid {
-		groupByCol = unnestColName
-	}
-
-	sql := fmt.Sprintf("SELECT %s FROM %s %s WHERE %s GROUP BY %s %s %s %s OFFSET %d",
-		strings.Join(selectCols, ", "),
-		safeName(mv.Table),
-		unnestClause,
-		whereClause,
-		groupByCol,
-		havingClause,
-		orderClause,
-		limitClause,
-		q.Offset,
-	)
-
-	return sql, args, nil
 }

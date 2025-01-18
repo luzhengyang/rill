@@ -13,16 +13,16 @@ rill env configure [flags]
 ### Flags
 
 ```
-      --path string      Project directory (default ".")
-      --subpath string   Project path to sub directory of a larger repository
-      --project string   
-      --redeploy         Redeploy project
+      --path string          Project directory (default ".")
+      --project string       
+      --environment string   Optional environment to resolve for (options: dev, prod)
 ```
 
 ### Global flags
 
 ```
-      --api-token string   Token for authenticating with the admin API
+      --api-token string   Token for authenticating with the cloud API
+      --format string      Output format (options: "human", "json", "csv") (default "human")
   -h, --help               Print usage
       --interactive        Prompt for missing required parameters (default true)
 ```

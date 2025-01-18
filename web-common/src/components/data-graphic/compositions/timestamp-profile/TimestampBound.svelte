@@ -5,49 +5,65 @@
    * This component will render the label bound on the TimestampDetail.svelte graph.
    * It also enables a shift + click to copy the bound as a query-ready timestamp.
    */
-  import { notifications } from "@rilldata/web-common/components/notifications";
   import Shortcut from "@rilldata/web-common/components/tooltip/Shortcut.svelte";
   import StackingWord from "@rilldata/web-common/components/tooltip/StackingWord.svelte";
   import Tooltip from "@rilldata/web-common/components/tooltip/Tooltip.svelte";
   import TooltipContent from "@rilldata/web-common/components/tooltip/TooltipContent.svelte";
   import TooltipShortcutContainer from "@rilldata/web-common/components/tooltip/TooltipShortcutContainer.svelte";
   import TooltipTitle from "@rilldata/web-common/components/tooltip/TooltipTitle.svelte";
-  import { createShiftClickAction } from "@rilldata/web-common/lib/actions/shift-click-action";
+  import {
+    copyToClipboard,
+    isClipboardApiSupported,
+  } from "@rilldata/web-common/lib/actions/copy-to-clipboard";
+  import { modified } from "@rilldata/web-common/lib/actions/modified-click";
   import {
     datePortion,
     timePortion,
   } from "@rilldata/web-common/lib/formatters";
+  import { timeGrainToDuration } from "@rilldata/web-common/lib/time/grains";
   import { removeLocalTimezoneOffset } from "@rilldata/web-common/lib/time/timezone";
-
-  const { shiftClickAction } = createShiftClickAction();
+  import type { V1TimeGrain } from "@rilldata/web-common/runtime-client";
 
   export let value: Date;
+  export let grain: V1TimeGrain;
   export let label = "value";
   export let align: "left" | "right" = "left";
+
   let valueWithoutOffset: Date | undefined;
+
   $: if (value instanceof Date)
-    valueWithoutOffset = removeLocalTimezoneOffset(value);
+    valueWithoutOffset = removeLocalTimezoneOffset(
+      value,
+      timeGrainToDuration(grain),
+    );
 </script>
 
-<Tooltip alignment={align == "left" ? "start" : "end"} distance={8}>
+<Tooltip
+  alignment={align == "left" ? "start" : "end"}
+  distance={8}
+  suppress={!isClipboardApiSupported()}
+>
   <button
     class="text-{align} text-gray-500"
     style:line-height={1.1}
-    use:shiftClickAction
-    on:shift-click={async () => {
-      if (valueWithoutOffset === undefined) return;
-      const exportedValue = `TIMESTAMP '${valueWithoutOffset.toISOString()}'`;
-      await navigator.clipboard.writeText(exportedValue);
-      notifications.send({ message: `copied ${exportedValue} to clipboard` });
-      // update this to set the active animation in the tooltip text
-    }}
+    on:click={modified({
+      shift: () => {
+        if (valueWithoutOffset === undefined) return;
+        const exportedValue = `TIMESTAMP '${valueWithoutOffset.toISOString()}'`;
+        copyToClipboard(exportedValue);
+      },
+    })}
   >
-    <div>
-      {datePortion(valueWithoutOffset)}
-    </div>
-    <div>
-      {timePortion(valueWithoutOffset)}
-    </div>
+    {#if valueWithoutOffset}
+      <div>
+        {datePortion(valueWithoutOffset)}
+      </div>
+      <div>
+        {timePortion(valueWithoutOffset)}
+      </div>
+    {:else}
+      loading...
+    {/if}
   </button>
   <TooltipContent slot="tooltip-content">
     <TooltipTitle>

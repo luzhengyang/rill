@@ -1,76 +1,77 @@
-<script context="module" lang="ts">
-  import { getStateManagers } from "../state-managers/state-managers";
+<script lang="ts">
+  import * as DropdownMenu from "@rilldata/web-common/components/dropdown-menu";
+  import Add from "@rilldata/web-common/components/icons/Add.svelte";
+  import type { SearchableFilterSelectableGroup } from "@rilldata/web-common/components/searchable-filter-menu/SearchableFilterSelectableItem";
+  import SearchableMenuContent from "@rilldata/web-common/components/searchable-filter-menu/SearchableMenuContent.svelte";
   import Tooltip from "@rilldata/web-common/components/tooltip/Tooltip.svelte";
   import TooltipContent from "@rilldata/web-common/components/tooltip/TooltipContent.svelte";
-  import Add from "@rilldata/web-common/components/icons/Add.svelte";
-  import SearchableFilterDropdown from "@rilldata/web-common/components/searchable-filter-menu/SearchableFilterDropdown.svelte";
-  import WithTogglableFloatingElement from "@rilldata/web-common/components/floating-element/WithTogglableFloatingElement.svelte";
-</script>
-
-<script lang="ts">
+  import { getDimensionDisplayName } from "@rilldata/web-common/features/dashboards/filters/getDisplayName";
+  import { getStateManagers } from "../state-managers/state-managers";
+  import { getMeasureDisplayName } from "./getDisplayName";
   const {
     selectors: {
       dimensions: { allDimensions },
-      dimensionFilters: { getAllFilters, isFilterExcludeMode },
+      dimensionFilters: { dimensionHasFilter },
+      measures: { filteredSimpleMeasures },
+      measureFilters: { measureHasFilter },
     },
     actions: {
-      dimensionsFilter: { toggleDimensionNameSelection },
+      filters: { setTemporaryFilterName },
     },
   } = getStateManagers();
 
-  function filterExists(name: string, exclude: boolean): boolean {
-    const selected = exclude
-      ? $getAllFilters?.exclude
-      : $getAllFilters?.include;
+  let open = false;
 
-    return selected?.find((f) => f.name === name) !== undefined;
-  }
-
-  $: selectableItems =
-    $allDimensions
-      ?.map((d) => ({
-        name: d.name as string,
-        label: d.label as string,
-      }))
-      .filter((d) => {
-        const exclude = $isFilterExcludeMode(d.name);
-        return !filterExists(d.name, exclude);
-      }) ?? [];
+  $: selectableGroups = [
+    <SearchableFilterSelectableGroup>{
+      name: "MEASURES",
+      items:
+        $filteredSimpleMeasures()
+          ?.map((m) => ({
+            name: m.name as string,
+            label: getMeasureDisplayName(m),
+          }))
+          .filter((m) => !$measureHasFilter(m.name)) ?? [],
+    },
+    <SearchableFilterSelectableGroup>{
+      name: "DIMENSIONS",
+      items:
+        $allDimensions
+          ?.map((d) => ({
+            name: (d.name || d.column) as string,
+            label: getDimensionDisplayName(d),
+          }))
+          .filter((d) => !$dimensionHasFilter(d.name)) ?? [],
+    },
+  ];
 </script>
 
-<WithTogglableFloatingElement
-  distance={8}
-  alignment="start"
-  let:toggleFloatingElement
-  let:active
->
-  <Tooltip distance={8} suppress={active}>
-    <button class:active on:click={toggleFloatingElement}>
-      <Add size="17px" />
-    </button>
-    <TooltipContent slot="tooltip-content">Add filter</TooltipContent>
-  </Tooltip>
+<DropdownMenu.Root bind:open typeahead={false}>
+  <DropdownMenu.Trigger asChild let:builder>
+    <Tooltip distance={8} suppress={open}>
+      <button class:active={open} use:builder.action {...builder}>
+        <Add size="17px" />
+      </button>
+      <TooltipContent slot="tooltip-content">Add filter</TooltipContent>
+    </Tooltip>
+  </DropdownMenu.Trigger>
 
-  <SearchableFilterDropdown
-    let:toggleFloatingElement
-    slot="floating-element"
-    selectedItems={[]}
+  <SearchableMenuContent
     allowMultiSelect={false}
-    {selectableItems}
-    on:escape={toggleFloatingElement}
-    on:click-outside={toggleFloatingElement}
-    on:item-clicked={(e) => {
-      toggleFloatingElement();
-      toggleDimensionNameSelection(e.detail.name);
+    onSelect={(name) => {
+      setTemporaryFilterName(name);
     }}
+    {selectableGroups}
+    selectedItems={[]}
   />
-</WithTogglableFloatingElement>
+</DropdownMenu.Root>
 
 <style lang="postcss">
   button {
     @apply w-[34px] h-[26px] rounded-2xl;
-    @apply px-[8px] py-[4px];
+    @apply flex items-center justify-center;
     @apply border border-dashed border-slate-300;
+    @apply bg-white;
   }
 
   button:hover {

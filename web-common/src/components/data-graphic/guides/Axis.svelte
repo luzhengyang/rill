@@ -137,8 +137,8 @@ This component will draw an axis on the specified side.
     }
   }
 
-  let axisLength;
-  let ticks = [];
+  let axisLength: number;
+  let ticks: number[] = [];
   $: if ($plotConfig) {
     if (xOrY === "x") axisLength = $plotConfig.graphicWidth;
     else axisLength = $plotConfig.graphicHeight;
@@ -147,8 +147,8 @@ This component will draw an axis on the specified side.
       xOrY,
       scale,
       axisLength,
-      $plotConfig[`${xOrY}Type`] === "date"
-    );
+      $plotConfig[`${xOrY}Type`],
+    ) as number[];
   }
 
   let formatterFunction;
@@ -157,7 +157,7 @@ This component will draw an axis on the specified side.
   $: if ($plotConfig[`${xOrY}Type`] === "date") {
     [formatterFunction, superLabelFormatter] = createTimeFormat(
       $mainScale.domain() as [Date, Date],
-      ticks?.length
+      ticks?.length,
     );
   } else {
     superlabel = false;
@@ -168,7 +168,6 @@ This component will draw an axis on the specified side.
     // this formatter often does the right thing, but may not in some
     // circumstances. See https://github.com/rilldata/rill/issues/3631
     const formatter = new SingleDigitTimesPowerOfTenFormatter(ticks, {
-      strategy: "singleDigitTimesPowerOfTen",
       numberKind,
       padWithInsignificantZeros: false,
     });

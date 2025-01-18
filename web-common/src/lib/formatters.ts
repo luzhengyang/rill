@@ -1,3 +1,4 @@
+import { removeLocalTimezoneOffset } from "@rilldata/web-common/lib/time/timezone";
 import { format } from "d3-format";
 import { timeFormat } from "d3-time-format";
 import {
@@ -5,7 +6,7 @@ import {
   DATES,
   FLOATS,
   INTEGERS,
-  Interval,
+  type Interval,
   INTERVALS,
   isList,
   isNested,
@@ -13,7 +14,6 @@ import {
   PreviewRollupInterval,
   TIMESTAMPS,
 } from "./duckdb-data-types";
-import { removeLocalTimezoneOffset } from "@rilldata/web-common/lib/time/timezone";
 import { formatDuckdbIntervalLossless } from "./number-formatting/strategies/intervals";
 
 /** This heuristic is courtesy Dominik Moritz.
@@ -104,7 +104,7 @@ export function microsToTimestring(microseconds: number) {
     return `${sign == 1 ? "" : "-"}${ms}ms`;
   }
   return `${sign == 1 ? "" : "-"}${zeroPad(hours)}:${zeroPad(
-    minutes
+    minutes,
   )}:${zeroPad(seconds)}.${msPad(ms)}`;
 }
 
@@ -154,7 +154,7 @@ export function formatCompactInteger(n: number) {
 
 export function formatDataType(value: unknown, type: string) {
   if (value === undefined) return "";
-  if (INTEGERS.has(type) || type.startsWith("DECIMAL")) {
+  if (INTEGERS.has(type) || type?.startsWith("DECIMAL")) {
     return value;
   } else if (FLOATS.has(type)) {
     return value;
@@ -199,13 +199,13 @@ export function formatDataType(value: unknown, type: string) {
  */
 export function formatDataTypeAsDuckDbQueryString(
   value: unknown,
-  type: string
+  type: string,
 ): string {
   if (value === undefined) return "undefined";
   if (value === null) return "null";
   if (
     INTEGERS.has(type) ||
-    type.startsWith("DECIMAL") ||
+    type?.startsWith("DECIMAL") ||
     CATEGORICALS.has(type) ||
     FLOATS.has(type)
   ) {

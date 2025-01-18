@@ -10,19 +10,18 @@ import (
 
 func AssumeCmd(ch *cmdutil.Helper) *cobra.Command {
 	var ttlMinutes int
+
 	assumeCmd := &cobra.Command{
 		Use:   "assume <email>",
 		Args:  cobra.ExactArgs(1),
 		Short: "Temporarily act as another user",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg := ch.Config
 			ctx := cmd.Context()
 
-			client, err := cmdutil.Client(cfg)
+			client, err := ch.Client()
 			if err != nil {
 				return err
 			}
-			defer client.Close()
 
 			res, err := client.IssueRepresentativeAuthToken(ctx, &adminv1.IssueRepresentativeAuthTokenRequest{
 				Email:      args[0],
@@ -54,11 +53,14 @@ func AssumeCmd(ch *cmdutil.Helper) *cobra.Command {
 				return err
 			}
 
-			// set the default token to the one we just got
-			cfg.AdminTokenDefault = res.Token
+			// Load new token
+			err = ch.ReloadAdminConfig()
+			if err != nil {
+				return err
+			}
 
 			// Select org for new user
-			err = auth.SelectOrgFlow(ctx, ch)
+			err = auth.SelectOrgFlow(ctx, ch, true)
 			if err != nil {
 				return err
 			}
@@ -68,5 +70,6 @@ func AssumeCmd(ch *cmdutil.Helper) *cobra.Command {
 	}
 
 	assumeCmd.Flags().IntVar(&ttlMinutes, "ttl-minutes", 60, "Minutes until the token should expire")
+
 	return assumeCmd
 }

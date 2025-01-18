@@ -1,9 +1,13 @@
-import type { BehaviourEventMedium } from "./BehaviourEventTypes";
-import { BehaviourEvent, BehaviourEventAction } from "./BehaviourEventTypes";
+import type { GithubEventFields } from "@rilldata/web-common/metrics/service/GithubEventTypes";
+import {
+  type BehaviourEvent,
+  BehaviourEventAction,
+  BehaviourEventMedium,
+} from "./BehaviourEventTypes";
 import { MetricsEventFactory } from "./MetricsEventFactory";
 import {
-  CommonFields,
-  CommonUserFields,
+  type CommonFields,
+  type CommonUserFields,
   MetricsEventScreenName,
   MetricsEventSpace,
 } from "./MetricsTypes";
@@ -17,40 +21,15 @@ export class BehaviourEventFactory extends MetricsEventFactory {
     medium: BehaviourEventMedium,
     space: MetricsEventSpace,
     source_screen: MetricsEventScreenName,
-    screen_name: MetricsEventScreenName
+    screen_name: MetricsEventScreenName,
   ): BehaviourEvent {
     const event = this.getBaseMetricsEvent(
       "behavioral",
+      BehaviourEventAction.Navigate,
       commonFields,
-      commonUserFields
+      commonUserFields,
     ) as BehaviourEvent;
     event.action = BehaviourEventAction.Navigate;
-    event.entity_id = entity_id;
-    event.medium = medium;
-    event.space = space;
-    event.screen_name = screen_name;
-    event.source_screen = source_screen;
-    return event;
-  }
-
-  public publishEvent(
-    commonFields: CommonFields,
-    commonUserFields: CommonUserFields,
-    entity_id: string,
-    medium: BehaviourEventMedium,
-    space: MetricsEventSpace,
-    source_screen: MetricsEventScreenName,
-    screen_name: MetricsEventScreenName,
-    isStart: boolean
-  ): BehaviourEvent {
-    const event = this.getBaseMetricsEvent(
-      "behavioral",
-      commonFields,
-      commonUserFields
-    ) as BehaviourEvent;
-    event.action = isStart
-      ? BehaviourEventAction.PublishStart
-      : BehaviourEventAction.PublishSuccess;
     event.entity_id = entity_id;
     event.medium = medium;
     event.space = space;
@@ -65,12 +44,13 @@ export class BehaviourEventFactory extends MetricsEventFactory {
     action: BehaviourEventAction,
     medium: BehaviourEventMedium,
     space: MetricsEventSpace,
-    project_id: string
+    project_id: string,
   ): BehaviourEvent {
     const event = this.getBaseMetricsEvent(
       "behavioral",
+      action,
       commonFields,
-      commonUserFields
+      commonUserFields,
     ) as BehaviourEvent;
     event.action = action;
     event.entity_id = project_id;
@@ -88,12 +68,13 @@ export class BehaviourEventFactory extends MetricsEventFactory {
     space: MetricsEventSpace,
     connection_type: SourceConnectionType,
     file_type: SourceFileType,
-    glob: boolean
+    glob: boolean,
   ): BehaviourEvent {
     const event = this.getBaseMetricsEvent(
       "behavioral",
+      BehaviourEventAction.SourceSuccess,
       commonFields,
-      commonUserFields
+      commonUserFields,
     ) as BehaviourEvent;
     event.action = BehaviourEventAction.SourceSuccess;
     event.medium = medium;
@@ -111,17 +92,60 @@ export class BehaviourEventFactory extends MetricsEventFactory {
     action: BehaviourEventAction,
     medium: BehaviourEventMedium,
     screen_name: MetricsEventScreenName,
-    space: MetricsEventSpace
+    space: MetricsEventSpace,
   ): BehaviourEvent {
     const event = this.getBaseMetricsEvent(
       "behavioral",
+      action,
       commonFields,
-      commonUserFields
+      commonUserFields,
     ) as BehaviourEvent;
     event.action = action;
     event.medium = medium;
     event.screen_name = screen_name;
     event.space = space;
+    return event;
+  }
+
+  public deployEvent(
+    commonFields: CommonFields,
+    commonUserFields: CommonUserFields,
+    action: BehaviourEventAction,
+  ): BehaviourEvent {
+    const event = this.getBaseMetricsEvent(
+      "behavioral",
+      action,
+      commonFields,
+      commonUserFields,
+    ) as BehaviourEvent;
+    event.action = BehaviourEventAction.DeployIntent;
+    event.medium = BehaviourEventMedium.Button;
+    event.space = MetricsEventSpace.Workspace;
+    event.screen_name = MetricsEventScreenName.Dashboard;
+    return event;
+  }
+
+  public githubIntent(
+    commonFields: CommonFields,
+    commonUserFields: CommonUserFields,
+    action: BehaviourEventAction,
+    githubFields?: GithubEventFields,
+  ): BehaviourEvent {
+    const event = this.getBaseMetricsEvent(
+      "behavioral",
+      BehaviourEventAction.DeployIntent,
+      commonFields,
+      commonUserFields,
+    ) as BehaviourEvent;
+    event.action = action;
+    event.medium = BehaviourEventMedium.Button;
+    event.space = MetricsEventSpace.Workspace;
+    event.screen_name = MetricsEventScreenName.Project;
+    if (githubFields) {
+      for (const key in githubFields) {
+        event[key] = githubFields[key];
+      }
+    }
     return event;
   }
 }

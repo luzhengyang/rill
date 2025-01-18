@@ -2,6 +2,7 @@ package https
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -11,6 +12,7 @@ import (
 	"github.com/rilldata/rill/runtime/drivers"
 	"github.com/rilldata/rill/runtime/pkg/activity"
 	"github.com/rilldata/rill/runtime/pkg/fileutil"
+	"github.com/rilldata/rill/runtime/storage"
 	"go.uber.org/zap"
 )
 
@@ -22,33 +24,59 @@ func init() {
 var spec = drivers.Spec{
 	DisplayName: "https",
 	Description: "Connect to a remote file.",
-	SourceProperties: []drivers.PropertySchema{
+	SourceProperties: []*drivers.PropertySpec{
 		{
 			Key:         "path",
+			Type:        drivers.StringPropertyType,
 			DisplayName: "Path",
 			Description: "Path to the remote file.",
 			Placeholder: "https://example.com/file.csv",
+			Required:    true,
+		},
+		{
+			Key:         "name",
 			Type:        drivers.StringPropertyType,
+			DisplayName: "Source name",
+			Description: "The name of the source",
+			Placeholder: "my_new_source",
 			Required:    true,
 		},
 	},
+	ImplementsFileStore: true,
 }
 
 type driver struct{}
 
-func (d driver) Open(config map[string]any, shared bool, client activity.Client, logger *zap.Logger) (drivers.Handle, error) {
-	if shared {
-		return nil, fmt.Errorf("https driver can't be shared")
+type ConfigProperties struct {
+	Path    string            `mapstructure:"path"`
+	URI     string            `mapstructure:"uri"`
+	Headers map[string]string `mapstructure:"headers"`
+}
+
+func (p *ConfigProperties) ResolvePath() string {
+	// Backwards compatibility for "uri" renamed to "path"
+	if p.URI != "" {
+		return p.URI
 	}
+	return p.Path
+}
+
+func (d driver) Open(instanceID string, config map[string]any, st *storage.Client, ac *activity.Client, logger *zap.Logger) (drivers.Handle, error) {
+	if instanceID == "" {
+		return nil, errors.New("https driver can't be shared")
+	}
+
+	cfg := &ConfigProperties{}
+	err := mapstructure.WeakDecode(config, cfg)
+	if err != nil {
+		return nil, err
+	}
+
 	conn := &connection{
 		config: config,
 		logger: logger,
 	}
 	return conn, nil
-}
-
-func (d driver) Drop(config map[string]any, logger *zap.Logger) error {
-	return drivers.ErrDropNotSupported
 }
 
 func (d driver) Spec() drivers.Spec {
@@ -91,6 +119,11 @@ type connection struct {
 
 var _ drivers.Handle = &connection{}
 
+// Ping implements drivers.Handle.
+func (c *connection) Ping(ctx context.Context) error {
+	return drivers.ErrNotImplemented
+}
+
 // Driver implements drivers.Connection.
 func (c *connection) Driver() string {
 	return "https"
@@ -131,6 +164,11 @@ func (c *connection) AsOLAP(instanceID string) (drivers.OLAPStore, bool) {
 	return nil, false
 }
 
+// AsAI implements drivers.Handle.
+func (c *connection) AsAI(instanceID string) (drivers.AIService, bool) {
+	return nil, false
+}
+
 // Migrate implements drivers.Connection.
 func (c *connection) Migrate(ctx context.Context) (err error) {
 	return nil
@@ -146,6 +184,16 @@ func (c *connection) AsObjectStore() (drivers.ObjectStore, bool) {
 	return nil, false
 }
 
+// AsModelExecutor implements drivers.Handle.
+func (c *connection) AsModelExecutor(instanceID string, opts *drivers.ModelExecutorOptions) (drivers.ModelExecutor, bool) {
+	return nil, false
+}
+
+// AsModelManager implements drivers.Handle.
+func (c *connection) AsModelManager(instanceID string) (drivers.ModelManager, bool) {
+	return nil, false
+}
+
 // AsTransporter implements drivers.Connection.
 func (c *connection) AsTransporter(from, to drivers.Handle) (drivers.Transporter, bool) {
 	return nil, false
@@ -155,9 +203,14 @@ func (c *connection) AsFileStore() (drivers.FileStore, bool) {
 	return c, true
 }
 
-// AsSQLStore implements drivers.Connection.
-func (c *connection) AsSQLStore() (drivers.SQLStore, bool) {
+// AsWarehouse implements drivers.Handle.
+func (c *connection) AsWarehouse() (drivers.Warehouse, bool) {
 	return nil, false
+}
+
+// AsNotifier implements drivers.Connection.
+func (c *connection) AsNotifier(properties map[string]any) (drivers.Notifier, error) {
+	return nil, drivers.ErrNotNotifier
 }
 
 // FilePaths implements drivers.FileStore

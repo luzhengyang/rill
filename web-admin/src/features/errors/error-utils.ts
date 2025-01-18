@@ -1,69 +1,105 @@
-import { goto } from "$app/navigation";
 import { page } from "$app/stores";
-import { isAdminServerQuery } from "@rilldata/web-admin/client/utils";
+import { redirectToLogin } from "@rilldata/web-admin/client/redirect-utils";
 import {
-  getScreenNameFromPage,
-  isDashboardPage,
+  isAdminServerQuery,
+  isOrgUsageQuery,
+} from "@rilldata/web-admin/client/utils";
+import { redirectToLoginOrRequestAccess } from "@rilldata/web-admin/features/authentication/checkUserAccess";
+import {
+  isAlertPage,
+  isMetricsExplorerPage,
   isProjectPage,
+  isProjectRequestAccessPage,
+  isPublicURLPage,
 } from "@rilldata/web-admin/features/navigation/nav-utils";
-import { errorEvent } from "@rilldata/web-common/metrics/initMetrics";
+import { errorEventHandler } from "@rilldata/web-common/metrics/initMetrics";
+import {
+  isGetResourceMetricsViewQuery,
+  isRuntimeQuery,
+} from "@rilldata/web-common/runtime-client/query-matcher";
 import type { Query } from "@tanstack/query-core";
 import type { QueryClient } from "@tanstack/svelte-query";
 import type { AxiosError } from "axios";
 import { get } from "svelte/store";
 import type { RpcStatus } from "../../client";
 import { getAdminServiceGetProjectQueryKey } from "../../client";
-import { ADMIN_URL } from "../../client/http-client";
-import { ErrorStoreState, errorStore } from "./error-store";
+import { errorStore, type ErrorStoreState } from "./error-store";
 
 export function createGlobalErrorCallback(queryClient: QueryClient) {
-  return (error: AxiosError, query: Query) => {
-    const screenName = getScreenNameFromPage(get(page));
-    if (!error.response) {
-      errorEvent?.fireHTTPErrorBoundaryEvent(
-        query.queryKey[0] as string,
-        "",
-        "unknown error",
-        screenName
-      );
+  return async (error: AxiosError, query: Query) => {
+    errorEventHandler?.requestErrorEventHandler(error, query);
+
+    const pageState = get(page);
+
+    const onPublicURLPage = isPublicURLPage(pageState);
+    if (onPublicURLPage) {
+      // When a token is expired, show a specific error page
+      if (
+        error.response?.status === 401 &&
+        (error.response.data as RpcStatus)?.message === "auth token is expired"
+      ) {
+        errorStore.set({
+          statusCode: 401,
+          header: "Oops! This link has expired",
+          body: "It looks like this link is no longer active. Please reach out to the sender to request a new link.",
+          fatal: true,
+        });
+        return;
+      }
+
+      // Let the Public URL page handle all other errors
       return;
-    } else {
-      errorEvent?.fireHTTPErrorBoundaryEvent(
-        query.queryKey[0] as string,
-        error.response?.status + "" ?? error.status,
-        (error.response?.data as RpcStatus)?.message ?? error.message,
-        screenName
-      );
+    }
+
+    // If an anonymous user hits a 403 error, redirect to the login page
+    if (error.response?.status === 403) {
+      const didRedirect = await redirectToLoginOrRequestAccess(pageState);
+      if (didRedirect) return;
     }
 
     // If unauthorized to the admin server, redirect to login page
     if (isAdminServerQuery(query) && error.response?.status === 401) {
-      goto(
-        `${ADMIN_URL}/auth/login?redirect=${window.location.origin}${window.location.pathname}`
-      );
+      redirectToLogin();
       return;
     }
 
+    const onProjectPage = isProjectPage(pageState);
+
     // Special handling for some errors on the Project page
-    const onProjectPage = isProjectPage(get(page));
-    if (onProjectPage && error.response?.status === 400) {
-      // If "repository not found", ignore the error and show the page
-      if (
-        (error.response.data as RpcStatus).message === "repository not found"
-      ) {
-        return;
+    if (onProjectPage) {
+      if (error.response?.status === 400) {
+        // If "repository not found", ignore the error and show the page
+        if (
+          (error.response.data as RpcStatus).message === "repository not found"
+        ) {
+          return;
+        }
+
+        // This error is the error:`driver.ErrNotFound` thrown while looking up an instance in the runtime.
+        if (
+          (error.response.data as RpcStatus).message === "driver: not found"
+        ) {
+          const [, org, proj] = pageState.url.pathname.split("/");
+          void queryClient.resetQueries(
+            getAdminServiceGetProjectQueryKey(org, proj),
+          );
+          return;
+        }
       }
-      // This error is the error:`driver.ErrNotFound` thrown while looking up an instance in the runtime.
-      if ((error.response.data as RpcStatus).message === "driver: not found") {
-        const [, org, proj] = get(page).url.pathname.split("/");
-        queryClient.resetQueries(getAdminServiceGetProjectQueryKey(org, proj));
+
+      // If the runtime throws a 401, it's likely due to a stale JWT that will soon be refreshed
+      if (isRuntimeQuery(query) && error.response?.status === 401) {
         return;
       }
     }
 
-    // Special handling for some errors on the Dashboard page
-    const onDashboardPage = isDashboardPage(get(page));
-    if (onDashboardPage) {
+    // Special handling for some errors on the Metrics Explorer page
+    const onMetricsExplorerPage = isMetricsExplorerPage(pageState);
+    if (onMetricsExplorerPage) {
+      // Let the Metrics Explorer page handle errors for runtime queries.
+      // Individual components (e.g. a specific line chart or leaderboard) should display a localised error message.
+      if (isRuntimeQuery(query)) return;
+
       // If a dashboard wasn't found, let +page.svelte handle the error.
       // Because the project may be reconciling, in which case we want to show a loading spinner not a 404.
       if (
@@ -80,15 +116,42 @@ export function createGlobalErrorCallback(queryClient: QueryClient) {
       }
     }
 
+    // Special handling for some errors on the Alerts page
+    const onAlertPage = isAlertPage(pageState);
+    if (onAlertPage) {
+      // Don't block on a Metrics View 404
+      if (
+        isGetResourceMetricsViewQuery(query) &&
+        error.response?.status === 404
+      ) {
+        return;
+      }
+    }
+
+    // do not block on request access failures
+    if (
+      isProjectRequestAccessPage(pageState) &&
+      error.response?.status !== 403
+    ) {
+      return;
+    }
+
+    // Handle case when usage metrics project is not unavailable for some reason.
+    // We shouldn't block the user in this case.
+    if (isOrgUsageQuery(query)) {
+      return;
+    }
+
     // Create a pretty message for the error page
     const errorStoreState = createErrorStoreStateFromAxiosError(error);
 
+    // Show the error page
     errorStore.set(errorStoreState);
   };
 }
 
 function createErrorStoreStateFromAxiosError(
-  error: AxiosError
+  error: AxiosError,
 ): ErrorStoreState {
   // Handle network errors
   if (error.message === "Network Error") {
@@ -133,11 +196,13 @@ function createErrorStoreStateFromAxiosError(
     statusCode: error.response?.status,
     header: "Sorry, unexpected error!",
     body: "Try refreshing the page, and reach out to us if that doesn't fix the error.",
+    detail: (error.response?.data as RpcStatus)?.message,
   };
 }
 
 export function createErrorPagePropsFromRoutingError(
-  statusCode: number
+  statusCode: number,
+  errorMessage: string,
 ): ErrorStoreState {
   if (statusCode === 404) {
     return {
@@ -152,39 +217,6 @@ export function createErrorPagePropsFromRoutingError(
     statusCode: statusCode,
     header: "Sorry, unexpected error!",
     body: "Try refreshing the page, and reach out to us if that doesn't fix the error.",
-  };
-}
-
-export function addJavascriptErrorListeners() {
-  const errorHandler = (errorEvt: ErrorEvent) => {
-    errorEvent?.fireJavascriptErrorBoundaryEvent(
-      errorEvt.error?.stack ?? "",
-      errorEvt.message,
-      getScreenNameFromPage(get(page))
-    );
-  };
-  const unhandledRejectionHandler = (rejectionEvent: PromiseRejectionEvent) => {
-    let stack = "";
-    let message = "";
-    if (typeof rejectionEvent.reason === "string") {
-      message = rejectionEvent.reason;
-    } else if (rejectionEvent.reason instanceof Error) {
-      stack = rejectionEvent.reason.stack ?? "";
-      message = rejectionEvent.reason.message;
-    } else {
-      message = String.toString.apply(rejectionEvent.reason);
-    }
-    errorEvent?.fireJavascriptErrorBoundaryEvent(
-      stack,
-      message,
-      getScreenNameFromPage(get(page))
-    );
-  };
-
-  window.addEventListener("error", errorHandler);
-  window.addEventListener("unhandledrejection", unhandledRejectionHandler);
-  return () => {
-    window.removeEventListener("error", errorHandler);
-    window.removeEventListener("unhandledrejection", unhandledRejectionHandler);
+    detail: errorMessage,
   };
 }

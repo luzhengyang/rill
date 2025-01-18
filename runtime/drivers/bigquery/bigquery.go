@@ -2,16 +2,15 @@ package bigquery
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"os"
-	"strings"
 
 	"cloud.google.com/go/bigquery"
 	"github.com/mitchellh/mapstructure"
 	"github.com/rilldata/rill/runtime/drivers"
 	"github.com/rilldata/rill/runtime/pkg/activity"
-	"github.com/rilldata/rill/runtime/pkg/fileutil"
 	"github.com/rilldata/rill/runtime/pkg/gcputil"
+	"github.com/rilldata/rill/runtime/storage"
 	"go.uber.org/zap"
 	"google.golang.org/api/option"
 )
@@ -23,10 +22,17 @@ func init() {
 
 // spec for bigquery connector
 var spec = drivers.Spec{
-	DisplayName:        "BigQuery",
-	Description:        "Import data from BigQuery.",
-	ServiceAccountDocs: "https://docs.rilldata.com/deploy/credentials/gcs",
-	SourceProperties: []drivers.PropertySchema{
+	DisplayName: "BigQuery",
+	Description: "Import data from BigQuery.",
+	DocsURL:     "https://docs.rilldata.com/reference/connectors/bigquery",
+	ConfigProperties: []*drivers.PropertySpec{
+		{
+			Key:  "google_application_credentials",
+			Type: drivers.FilePropertyType,
+			Hint: "Enter path of file to load from.",
+		},
+	},
+	SourceProperties: []*drivers.PropertySpec{
 		{
 			Key:         "sql",
 			Type:        drivers.StringPropertyType,
@@ -45,49 +51,23 @@ var spec = drivers.Spec{
 			Hint:        "Rill will use the project ID from your local credentials, unless set here. Set this if no project ID configured in credentials.",
 		},
 		{
+			Key:         "name",
+			Type:        drivers.StringPropertyType,
+			DisplayName: "Source name",
+			Description: "The name of the source",
+			Placeholder: "my_new_source",
+			Required:    true,
+		},
+		{
 			Key:         "google_application_credentials",
+			Type:        drivers.InformationalPropertyType,
 			DisplayName: "GCP credentials",
 			Description: "GCP credentials inferred from your local environment.",
-			Type:        drivers.InformationalPropertyType,
 			Hint:        "Set your local credentials: <code>gcloud auth application-default login</code> Click to learn more.",
-			Href:        "https://docs.rilldata.com/develop/import-data#configure-credentials-for-gcs",
+			DocsURL:     "https://docs.rilldata.com/reference/connectors/gcs#local-credentials",
 		},
 	},
-	ConfigProperties: []drivers.PropertySchema{
-		{
-			Key:  "google_application_credentials",
-			Hint: "Enter path of file to load from.",
-			ValidateFunc: func(any interface{}) error {
-				val := any.(string)
-				if val == "" {
-					// user can chhose to leave empty for public sources
-					return nil
-				}
-
-				path, err := fileutil.ExpandHome(strings.TrimSpace(val))
-				if err != nil {
-					return err
-				}
-
-				_, err = os.Stat(path)
-				return err
-			},
-			TransformFunc: func(any interface{}) interface{} {
-				val := any.(string)
-				if val == "" {
-					return ""
-				}
-
-				path, err := fileutil.ExpandHome(strings.TrimSpace(val))
-				if err != nil {
-					return err
-				}
-				// ignoring error since PathError is already validated
-				content, _ := os.ReadFile(path)
-				return string(content)
-			},
-		},
-	},
+	ImplementsWarehouse: true,
 }
 
 type driver struct{}
@@ -97,25 +77,23 @@ type configProperties struct {
 	AllowHostAccess bool   `mapstructure:"allow_host_access"`
 }
 
-func (d driver) Open(config map[string]any, shared bool, client activity.Client, logger *zap.Logger) (drivers.Handle, error) {
-	if shared {
-		return nil, fmt.Errorf("bigquery driver can't be shared")
+func (d driver) Open(instanceID string, config map[string]any, st *storage.Client, ac *activity.Client, logger *zap.Logger) (drivers.Handle, error) {
+	if instanceID == "" {
+		return nil, errors.New("bigquery driver can't be shared")
 	}
+
 	conf := &configProperties{}
-	err := mapstructure.Decode(config, conf)
+	err := mapstructure.WeakDecode(config, conf)
 	if err != nil {
 		return nil, err
 	}
 
 	conn := &Connection{
-		config: conf,
-		logger: logger,
+		config:  conf,
+		storage: st,
+		logger:  logger,
 	}
 	return conn, nil
-}
-
-func (d driver) Drop(config map[string]any, logger *zap.Logger) error {
-	return drivers.ErrDropNotSupported
 }
 
 func (d driver) Spec() drivers.Spec {
@@ -132,13 +110,17 @@ func (d driver) TertiarySourceConnectors(ctx context.Context, src map[string]any
 }
 
 type Connection struct {
-	config *configProperties
-	logger *zap.Logger
+	config  *configProperties
+	storage *storage.Client
+	logger  *zap.Logger
 }
 
 var _ drivers.Handle = &Connection{}
 
-var _ drivers.SQLStore = &Connection{}
+// Ping implements drivers.Handle.
+func (c *Connection) Ping(ctx context.Context) error {
+	return drivers.ErrNotImplemented
+}
 
 // Driver implements drivers.Connection.
 func (c *Connection) Driver() string {
@@ -148,7 +130,7 @@ func (c *Connection) Driver() string {
 // Config implements drivers.Connection.
 func (c *Connection) Config() map[string]any {
 	m := make(map[string]any, 0)
-	_ = mapstructure.Decode(c.config, m)
+	_ = mapstructure.Decode(c.config, &m)
 	return m
 }
 
@@ -177,6 +159,11 @@ func (c *Connection) AsAdmin(instanceID string) (drivers.AdminService, bool) {
 	return nil, false
 }
 
+// AsAI implements drivers.Handle.
+func (c *Connection) AsAI(instanceID string) (drivers.AIService, bool) {
+	return nil, false
+}
+
 // OLAP implements drivers.Connection.
 func (c *Connection) AsOLAP(instanceID string) (drivers.OLAPStore, bool) {
 	return nil, false
@@ -197,9 +184,14 @@ func (c *Connection) AsObjectStore() (drivers.ObjectStore, bool) {
 	return nil, false
 }
 
-// AsSQLStore implements drivers.Connection.
-func (c *Connection) AsSQLStore() (drivers.SQLStore, bool) {
-	return c, true
+// AsModelExecutor implements drivers.Handle.
+func (c *Connection) AsModelExecutor(instanceID string, opts *drivers.ModelExecutorOptions) (drivers.ModelExecutor, bool) {
+	return nil, false
+}
+
+// AsModelManager implements drivers.Handle.
+func (c *Connection) AsModelManager(instanceID string) (drivers.ModelManager, bool) {
+	return nil, false
 }
 
 // AsTransporter implements drivers.Connection.
@@ -209,6 +201,16 @@ func (c *Connection) AsTransporter(from, to drivers.Handle) (drivers.Transporter
 
 func (c *Connection) AsFileStore() (drivers.FileStore, bool) {
 	return nil, false
+}
+
+// AsWarehouse implements drivers.Handle.
+func (c *Connection) AsWarehouse() (drivers.Warehouse, bool) {
+	return c, true
+}
+
+// AsNotifier implements drivers.Connection.
+func (c *Connection) AsNotifier(properties map[string]any) (drivers.Notifier, error) {
+	return nil, drivers.ErrNotNotifier
 }
 
 type sourceProperties struct {

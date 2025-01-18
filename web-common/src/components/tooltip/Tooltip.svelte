@@ -20,11 +20,14 @@ FIXME: In the future, we should also be listening to focus events from the child
 <script lang="ts">
   import { setContext } from "svelte";
   import { writable } from "svelte/store";
-  import Portal from "../Portal.svelte";
   import FloatingElement from "../floating-element/FloatingElement.svelte";
+  import type {
+    Alignment,
+    Location,
+  } from "@rilldata/web-common/lib/place-element";
 
-  export let location = "bottom";
-  export let alignment = "middle";
+  export let location: Location = "bottom";
+  export let alignment: Alignment = "middle";
   export let distance = 0;
   export let pad = 8;
   // provide a programmatic guard to suppressing the tooltip.
@@ -33,12 +36,11 @@ FIXME: In the future, we should also be listening to focus events from the child
   export let activeDelay = 120;
   /** the delay in miliseconds before unrendering the tooltip once mouse has left */
   export let nonActiveDelay = 0;
-
   export let active = false;
 
-  let parent;
+  let parent: HTMLDivElement;
+  let waitUntilTimer: ReturnType<typeof setTimeout>;
 
-  let waitUntilTimer;
   function waitUntil(callback, time = 120) {
     if (waitUntilTimer) clearTimeout(waitUntilTimer);
     waitUntilTimer = setTimeout(callback, time);
@@ -53,7 +55,7 @@ FIXME: In the future, we should also be listening to focus events from the child
   const childRequestedTooltipSuppression = writable(false);
   setContext(
     "rill:app:childRequestedTooltipSuppression",
-    childRequestedTooltipSuppression
+    childRequestedTooltipSuppression,
   );
 </script>
 
@@ -74,18 +76,8 @@ FIXME: In the future, we should also be listening to focus events from the child
 >
   <slot />
   {#if active && !suppress && !$childRequestedTooltipSuppression}
-    <Portal>
-      <div style="z-index:50;">
-        <FloatingElement
-          target={parent}
-          {location}
-          {alignment}
-          {distance}
-          {pad}
-        >
-          <slot name="tooltip-content" />
-        </FloatingElement>
-      </div>
-    </Portal>
+    <FloatingElement target={parent} {location} {alignment} {distance} {pad}>
+      <slot name="tooltip-content" />
+    </FloatingElement>
   {/if}
 </div>

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -16,19 +15,19 @@ import (
 	"github.com/hashicorp/go-version"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rilldata/rill/admin"
-	"github.com/rilldata/rill/admin/pkg/urlutil"
+	"github.com/rilldata/rill/admin/database"
 	"github.com/rilldata/rill/admin/server/auth"
 	"github.com/rilldata/rill/admin/server/cookies"
 	adminv1 "github.com/rilldata/rill/proto/gen/rill/admin/v1"
 	"github.com/rilldata/rill/runtime/pkg/activity"
 	"github.com/rilldata/rill/runtime/pkg/graceful"
+	"github.com/rilldata/rill/runtime/pkg/httputil"
 	"github.com/rilldata/rill/runtime/pkg/middleware"
 	"github.com/rilldata/rill/runtime/pkg/observability"
 	"github.com/rilldata/rill/runtime/pkg/ratelimit"
 	runtimeauth "github.com/rilldata/rill/runtime/server/auth"
 	"github.com/rs/cors"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
-	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -40,18 +39,17 @@ import (
 var (
 	_minCliVersion         = version.Must(version.NewVersion("0.20.0"))
 	_minCliVersionByMethod = map[string]*version.Version{
-		"/rill.admin.v1.AdminService/UpdateProject":      version.Must(version.NewVersion("0.28.0")),
-		"/rill.admin.v1.AdminService/UpdateOrganization": version.Must(version.NewVersion("0.28.0")),
+		"/rill.admin.v1.AdminService/UpdateProject":          version.Must(version.NewVersion("0.28.0")),
+		"/rill.admin.v1.AdminService/UpdateOrganization":     version.Must(version.NewVersion("0.28.0")),
+		"/rill.admin.v1.AdminService/UpdateProjectVariables": version.Must(version.NewVersion("0.51.0")),
 	}
 )
 
 type Options struct {
 	HTTPPort               int
 	GRPCPort               int
-	ExternalURL            string
-	FrontendURL            string
-	SessionKeyPairs        [][]byte
 	AllowedOrigins         []string
+	SessionKeyPairs        [][]byte
 	ServePrometheus        bool
 	AuthDomain             string
 	AuthClientID           string
@@ -60,45 +58,65 @@ type Options struct {
 	GithubAppWebhookSecret string
 	GithubClientID         string
 	GithubClientSecret     string
+	// AssetsBucket is the path on gcs where rill managed project artifacts are stored.
+	AssetsBucket string
 }
 
 type Server struct {
 	adminv1.UnsafeAdminServiceServer
+	adminv1.UnsafeAIServiceServer
+	adminv1.UnsafeTelemetryServiceServer
 	logger        *zap.Logger
 	admin         *admin.Service
 	opts          *Options
 	cookies       *cookies.Store
 	authenticator *auth.Authenticator
 	issuer        *runtimeauth.Issuer
-	urls          *externalURLs
 	limiter       ratelimit.Limiter
-	// Activity specifically for events from UI
-	uiActivity activity.Client
+	activity      *activity.Client
 }
 
 var _ adminv1.AdminServiceServer = (*Server)(nil)
 
-func New(logger *zap.Logger, adm *admin.Service, issuer *runtimeauth.Issuer, limiter ratelimit.Limiter, uiActivity activity.Client, opts *Options) (*Server, error) {
-	externalURL, err := url.Parse(opts.ExternalURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse external URL: %w", err)
-	}
+var _ adminv1.AIServiceServer = (*Server)(nil)
 
+var _ adminv1.TelemetryServiceServer = (*Server)(nil)
+
+func New(logger *zap.Logger, adm *admin.Service, issuer *runtimeauth.Issuer, limiter ratelimit.Limiter, activityClient *activity.Client, opts *Options) (*Server, error) {
 	if len(opts.SessionKeyPairs) == 0 {
 		return nil, fmt.Errorf("provided SessionKeyPairs is empty")
 	}
 
 	cookieStore := cookies.New(logger, opts.SessionKeyPairs...)
+
+	// Auth tokens are validated against the DB on each request, so we can set a long MaxAge.
 	cookieStore.MaxAge(60 * 60 * 24 * 365 * 10) // 10 years
-	cookieStore.Options.Secure = externalURL.Scheme == "https"
+
+	// Set Secure if the admin service is served over HTTPS (will resolve to true in production and false in local dev environments).
+	cookieStore.Options.Secure = adm.URLs.IsHTTPS()
+
+	// Only the admin server reads its cookies, so we can set HttpOnly (i.e. UI should not access cookie contents).
 	cookieStore.Options.HttpOnly = true
+
+	// Only the admin server reads its cookies, so we can set Domain to be the admin server's sub-domain (e.g. admin.rilldata.com).
+	// That is automatically accomplished when Domain is not set.
+	cookieStore.Options.Domain = ""
+
+	// We need to protect against CSRF and clickjacking attacks, but still support requests from the UI to the admin service.
+	// This is accomplished by setting SameSite=Lax (note that "site" just means the same root domain, not sub-domain).
+	// For example, cookies will be passed on requests from ui.rilldata.com to admin.rilldata.com (or localhost:3000 to localhost:8080),
+	// but not for requests from a different site AND NOT from an iframe of ui.rilldata.com on a different site.
+	//
+	// Note: We use Lax instead of Strict because we need cookies to be passed on redirects to the admin service from external providers, namely Auth0 and Github.
+	//
+	// Note on embedding: When embedding our UI, requests are only made to the runtime using the ephemeral JWT generated for the iframe. So we do not need cookies to be passed.
+	// In the future, if iframes need to communicate with the admin service, we should introduce a scheme involving ephemeral tokens and not rely on cookies.
+	cookieStore.Options.SameSite = http.SameSiteLaxMode
 
 	authenticator, err := auth.NewAuthenticator(logger, adm, cookieStore, &auth.AuthenticatorOptions{
 		AuthDomain:       opts.AuthDomain,
 		AuthClientID:     opts.AuthClientID,
 		AuthClientSecret: opts.AuthClientSecret,
-		ExternalURL:      opts.ExternalURL,
-		FrontendURL:      opts.FrontendURL,
 	})
 	if err != nil {
 		return nil, err
@@ -111,9 +129,8 @@ func New(logger *zap.Logger, adm *admin.Service, issuer *runtimeauth.Issuer, lim
 		cookies:       cookieStore,
 		authenticator: authenticator,
 		issuer:        issuer,
-		urls:          newURLRegistry(opts),
 		limiter:       limiter,
-		uiActivity:    uiActivity,
+		activity:      activityClient,
 	}, nil
 }
 
@@ -142,6 +159,8 @@ func (s *Server) ServeGRPC(ctx context.Context) error {
 	)
 
 	adminv1.RegisterAdminServiceServer(server, s)
+	adminv1.RegisterAIServiceServer(server, s)
+	adminv1.RegisterTelemetryServiceServer(server, s)
 	s.logger.Sugar().Infof("serving admin gRPC on port:%v", s.opts.GRPCPort)
 	return graceful.ServeGRPC(ctx, server, s.opts.GRPCPort)
 }
@@ -155,14 +174,17 @@ func (s *Server) ServeHTTP(ctx context.Context) error {
 
 	server := &http.Server{Handler: handler}
 	s.logger.Sugar().Infof("serving admin HTTP on port:%v", s.opts.HTTPPort)
-	return graceful.ServeHTTP(ctx, server, s.opts.HTTPPort)
+
+	return graceful.ServeHTTP(ctx, server, graceful.ServeOptions{
+		Port: s.opts.HTTPPort,
+	})
 }
 
 // HTTPHandler HTTP handler serving REST gateway.
 func (s *Server) HTTPHandler(ctx context.Context) (http.Handler, error) {
 	// Create REST gateway
 	gwMux := gateway.NewServeMux(
-		gateway.WithErrorHandler(HTTPErrorHandler),
+		gateway.WithErrorHandler(httpErrorHandler),
 		gateway.WithMetadata(s.authenticator.Annotator),
 	)
 	opts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
@@ -171,10 +193,27 @@ func (s *Server) HTTPHandler(ctx context.Context) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
+	err = adminv1.RegisterAIServiceHandlerFromEndpoint(ctx, gwMux, grpcAddress, opts)
+	if err != nil {
+		return nil, err
+	}
+	err = adminv1.RegisterTelemetryServiceHandlerFromEndpoint(ctx, gwMux, grpcAddress, opts)
+	if err != nil {
+		return nil, err
+	}
 
 	// Create regular http mux and mount gwMux on it
 	mux := http.NewServeMux()
 	mux.Handle("/v1/", gwMux)
+
+	// Add runtime proxy
+	observability.MuxHandle(mux, "/v1/orgs/{org}/projects/{project}/runtime/{path...}",
+		observability.Middleware(
+			"runtime-proxy",
+			s.logger,
+			s.authenticator.HTTPMiddlewareLenient(httputil.Handler(s.runtimeProxyForOrgAndProject)),
+		),
+	)
 
 	// Add Prometheus
 	if s.opts.ServePrometheus {
@@ -190,8 +229,28 @@ func (s *Server) HTTPHandler(ctx context.Context) (http.Handler, error) {
 	// Add Github-related endpoints (not gRPC handlers, just regular endpoints on /github/*)
 	s.registerGithubEndpoints(mux)
 
-	// Add temporary internal endpoint for refreshing sources
-	mux.Handle("/internal/projects/trigger-refresh", otelhttp.WithRouteTag("/internal/projects/trigger-refresh", http.HandlerFunc(s.triggerRefreshSourcesInternal)))
+	// Add project assets endpoint.
+	mux.Handle("/v1/assets/{asset_id}/download", observability.Middleware("assets", s.logger, s.authenticator.HTTPMiddleware(httputil.Handler(s.assetHandler))))
+
+	// Add biller webhook handler if any
+	if s.admin.Biller != nil {
+		handlerFunc := s.admin.Biller.WebhookHandlerFunc(ctx, s.admin.Jobs)
+		if handlerFunc != nil {
+			inner := http.NewServeMux()
+			observability.MuxHandle(inner, "/billing/webhook", handlerFunc)
+			mux.Handle("/billing/webhook", observability.Middleware("admin", s.logger, inner))
+		}
+	}
+
+	// Add payment webhook handler if any
+	if s.admin.PaymentProvider != nil {
+		handlerFunc := s.admin.PaymentProvider.WebhookHandlerFunc(ctx, s.admin.Jobs)
+		if handlerFunc != nil {
+			inner := http.NewServeMux()
+			observability.MuxHandle(inner, "/payment/webhook", handlerFunc)
+			mux.Handle("/payment/webhook", observability.Middleware("admin", s.logger, inner))
+		}
+	}
 
 	// Build CORS options for admin server
 
@@ -232,21 +291,36 @@ func (s *Server) HTTPHandler(ctx context.Context) (http.Handler, error) {
 	return handler, nil
 }
 
+// Ping implements AdminService
+func (s *Server) Ping(ctx context.Context, req *adminv1.PingRequest) (*adminv1.PingResponse, error) {
+	resp := &adminv1.PingResponse{
+		Version: "", // TODO: Return version
+		Time:    timestamppb.New(time.Now()),
+	}
+	return resp, nil
+}
+
 func (s *Server) checkRateLimit(ctx context.Context) (context.Context, error) {
-	var limitKey string
 	method, ok := grpc.Method(ctx)
 	if !ok {
 		return ctx, fmt.Errorf("server context does not have a method")
 	}
+
+	var limitKey string
 	if auth.GetClaims(ctx).OwnerType() == auth.OwnerTypeAnon {
 		limitKey = ratelimit.AnonLimitKey(method, observability.GrpcPeer(ctx))
 	} else {
 		limitKey = ratelimit.AuthLimitKey(method, auth.GetClaims(ctx).OwnerID())
 	}
 
-	if err := s.limiter.Limit(ctx, limitKey, ratelimit.Default); err != nil {
+	limit := ratelimit.Default
+	if strings.HasPrefix(method, "/rill.admin.v1.AIService") {
+		limit = ratelimit.Sensitive
+	}
+
+	if err := s.limiter.Limit(ctx, limitKey, limit); err != nil {
 		if errors.As(err, &ratelimit.QuotaExceededError{}) {
-			return ctx, status.Errorf(codes.ResourceExhausted, err.Error())
+			return ctx, status.Error(codes.ResourceExhausted, err.Error())
 		}
 		return ctx, err
 	}
@@ -257,14 +331,16 @@ func (s *Server) checkRateLimit(ctx context.Context) (context.Context, error) {
 func (s *Server) jwtAttributesForUser(ctx context.Context, userID, orgID string, projectPermissions *adminv1.ProjectPermissions) (map[string]any, error) {
 	user, err := s.admin.DB.FindUser(ctx, userID)
 	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
+		return nil, err
 	}
 
 	groups, err := s.admin.DB.FindUsergroupsForUser(ctx, user.ID, orgID)
 	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, err
 	}
-	groupNames := make([]string, len(groups))
+
+	// Using []any instead of []string since attr must be compatible with structpb.NewStruct
+	groupNames := make([]any, len(groups))
 	for i, group := range groups {
 		groupNames[i] = group.Name
 	}
@@ -280,9 +356,9 @@ func (s *Server) jwtAttributesForUser(ctx context.Context, userID, orgID string,
 	return attr, nil
 }
 
-// HTTPErrorHandler wraps gateway.DefaultHTTPErrorHandler to map gRPC unknown errors (i.e. errors without an explicit
+// httpErrorHandler wraps gateway.DefaultHTTPErrorHandler to map gRPC unknown errors (i.e. errors without an explicit
 // code) to HTTP status code 400 instead of 500.
-func HTTPErrorHandler(ctx context.Context, mux *gateway.ServeMux, marshaler gateway.Marshaler, w http.ResponseWriter, r *http.Request, err error) {
+func httpErrorHandler(ctx context.Context, mux *gateway.ServeMux, marshaler gateway.Marshaler, w http.ResponseWriter, r *http.Request, err error) {
 	s := status.Convert(err)
 	if s.Code() == codes.Unknown {
 		err = &gateway.HTTPStatusError{HTTPStatus: http.StatusBadRequest, Err: err}
@@ -290,16 +366,18 @@ func HTTPErrorHandler(ctx context.Context, mux *gateway.ServeMux, marshaler gate
 	gateway.DefaultHTTPErrorHandler(ctx, mux, marshaler, w, r, err)
 }
 
-// Ping implements AdminService
-func (s *Server) Ping(ctx context.Context, req *adminv1.PingRequest) (*adminv1.PingResponse, error) {
-	resp := &adminv1.PingResponse{
-		Version: "", // TODO: Return version
-		Time:    timestamppb.New(time.Now()),
-	}
-	return resp, nil
-}
-
 func timeoutSelector(fullMethodName string) time.Duration {
+	if strings.HasPrefix(fullMethodName, "/rill.admin.v1.AIService") {
+		return time.Minute * 2
+	}
+	switch fullMethodName {
+	case
+		"/rill.admin.v1.AdminService/CreateProject",
+		"/rill.admin.v1.AdminService/UpdateProject",
+		"/rill.admin.v1.AdminService/RedeployProject",
+		"/rill.admin.v1.AdminService/TriggerRedeploy":
+		return time.Minute * 5
+	}
 	return time.Minute
 }
 
@@ -324,13 +402,25 @@ func mapGRPCError(err error) error {
 	if err == nil {
 		return nil
 	}
+	if _, ok := status.FromError(err); ok {
+		return err
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return status.Error(codes.DeadlineExceeded, err.Error())
 	}
 	if errors.Is(err, context.Canceled) {
 		return status.Error(codes.Canceled, err.Error())
 	}
-	return err
+	if errors.Is(err, database.ErrNotFound) {
+		return status.Error(codes.NotFound, err.Error())
+	}
+	if errors.Is(err, database.ErrNotUnique) {
+		return status.Error(codes.AlreadyExists, err.Error())
+	}
+	if errors.Is(err, database.ErrValidation) {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
+	return status.Error(codes.Internal, err.Error())
 }
 
 // checkUserAgent is an interceptor that checks rejects from requests from old versions of the Rill CLI.
@@ -360,54 +450,8 @@ func checkUserAgent(ctx context.Context) (context.Context, error) {
 	}
 
 	if v.LessThan(minVersion) {
-		return nil, status.Error(codes.PermissionDenied, fmt.Sprintf("Rill %s is no longer supported for given operation, please upgrade to the latest version", v))
+		return nil, status.Error(codes.PermissionDenied, fmt.Sprintf("Rill %s is no longer supported for this operation, run `rill upgrade` to upgrade to the latest version", v))
 	}
 
 	return ctx, nil
-}
-
-type externalURLs struct {
-	external              string
-	frontend              string
-	githubConnectUI       string
-	githubConnect         string
-	githubConnectRetry    string
-	githubConnectRequest  string
-	githubConnectSuccess  string
-	githubAppInstallation string
-	githubAuth            string
-	githubAuthCallback    string
-	githubAuthRetry       string
-	authLogin             string
-}
-
-func newURLRegistry(opts *Options) *externalURLs {
-	return &externalURLs{
-		external:              opts.ExternalURL,
-		frontend:              opts.FrontendURL,
-		githubConnectUI:       urlutil.MustJoinURL(opts.FrontendURL, "/-/github/connect"),
-		githubConnect:         urlutil.MustJoinURL(opts.ExternalURL, "/github/connect"),
-		githubConnectRetry:    urlutil.MustJoinURL(opts.FrontendURL, "/-/github/connect/retry-install"),
-		githubConnectRequest:  urlutil.MustJoinURL(opts.FrontendURL, "/-/github/connect/request"),
-		githubConnectSuccess:  urlutil.MustJoinURL(opts.FrontendURL, "/-/github/connect/success"),
-		githubAppInstallation: fmt.Sprintf("https://github.com/apps/%s/installations/new", opts.GithubAppName),
-		githubAuth:            urlutil.MustJoinURL(opts.ExternalURL, "/github/auth/login"),
-		githubAuthCallback:    urlutil.MustJoinURL(opts.ExternalURL, "/github/auth/callback"),
-		githubAuthRetry:       urlutil.MustJoinURL(opts.FrontendURL, "/-/github/connect/retry-auth"),
-		authLogin:             urlutil.MustJoinURL(opts.ExternalURL, "/auth/login"),
-	}
-}
-
-func (u *externalURLs) reportOpen(org, project, projectSubpath string) string {
-	res := urlutil.MustJoinURL(u.frontend, org, project)
-	res += projectSubpath // Need to do an unsafe concat to provide flexibility, e.g. to avoid escaping '?'
-	return res
-}
-
-func (u *externalURLs) reportExport(org, project, report string) string {
-	return urlutil.MustJoinURL(u.frontend, org, project, "-", "reports", report, "export")
-}
-
-func (u *externalURLs) reportEdit(org, project, report string) string {
-	return urlutil.MustJoinURL(u.frontend, org, project, "-", "reports", report)
 }

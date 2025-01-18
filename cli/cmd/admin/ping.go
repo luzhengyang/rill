@@ -1,7 +1,7 @@
 package admin
 
 import (
-	"context"
+	"time"
 
 	"github.com/rilldata/rill/cli/pkg/cmdutil"
 	adminv1 "github.com/rilldata/rill/proto/gen/rill/admin/v1"
@@ -15,22 +15,22 @@ func PingCmd(ch *cmdutil.Helper) *cobra.Command {
 		Use:   "ping",
 		Short: "Ping",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg := ch.Config
 			// Must set here to avoid flag parser overriding it globally
-			cfg.AdminURL = adminURL
+			ch.AdminURLOverride = adminURL
 
-			client, err := cmdutil.Client(cfg)
-			if err != nil {
-				return err
-			}
-			defer client.Close()
-
-			pong, err := client.Ping(context.Background(), &adminv1.PingRequest{})
+			client, err := ch.Client()
 			if err != nil {
 				return err
 			}
 
-			ch.Printer.Printf("Pong: %s\n", pong.Time.AsTime().String())
+			ch.Printf("Ping: %s\n", time.Now().UTC().String())
+
+			pong, err := client.Ping(cmd.Context(), &adminv1.PingRequest{})
+			if err != nil {
+				return err
+			}
+
+			ch.Printf("Pong: %s\n", pong.Time.AsTime().String())
 			return nil
 		},
 	}

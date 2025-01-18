@@ -1,4 +1,4 @@
-import { NumberKind, NumberParts } from "./humanizer-types";
+import { NumberKind, type NumberParts } from "./humanizer-types";
 import { PerRangeFormatter } from "./strategies/per-range";
 
 /**
@@ -33,8 +33,7 @@ export function formatMeasurePercentageDifference(value: number): NumberParts {
     };
   }
 
-  const factory = new PerRangeFormatter([], {
-    strategy: "perRange",
+  const factory = new PerRangeFormatter({
     rangeSpecs: [
       {
         minMag: -2,

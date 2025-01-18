@@ -2,6 +2,7 @@ import type {
   BehaviourEventAction,
   BehaviourEventMedium,
 } from "@rilldata/web-common/metrics/service/BehaviourEventTypes";
+import type { GithubEventFields } from "@rilldata/web-common/metrics/service/GithubEventTypes";
 import type { MetricsService } from "@rilldata/web-common/metrics/service/MetricsService";
 import type {
   CommonUserFields,
@@ -18,7 +19,7 @@ import type {
 export class BehaviourEventHandler {
   public constructor(
     private readonly metricsService: MetricsService,
-    private readonly commonUserMetrics: CommonUserFields
+    private readonly commonUserMetrics: CommonUserFields,
   ) {
     this.commonUserMetrics = commonUserMetrics;
   }
@@ -28,7 +29,7 @@ export class BehaviourEventHandler {
     medium: BehaviourEventMedium,
     space: MetricsEventSpace,
     source_screen: MetricsEventScreenName,
-    screen_name: MetricsEventScreenName
+    screen_name: MetricsEventScreenName,
   ) {
     const hashedName = MD5(entity_name).toString();
     return this.metricsService.dispatch("navigationEvent", [
@@ -41,31 +42,11 @@ export class BehaviourEventHandler {
     ]);
   }
 
-  public firePublishEvent(
-    entity_name: string,
-    medium: BehaviourEventMedium,
-    space: MetricsEventSpace,
-    source_screen: MetricsEventScreenName,
-    screen_name: MetricsEventScreenName,
-    isStart: boolean
-  ) {
-    const hashedName = MD5(entity_name).toString();
-    return this.metricsService.dispatch("publishEvent", [
-      this.commonUserMetrics,
-      hashedName,
-      medium,
-      space,
-      source_screen,
-      screen_name,
-      isStart,
-    ]);
-  }
-
   public fireSplashEvent(
     action: BehaviourEventAction,
     medium: BehaviourEventMedium,
     space: MetricsEventSpace,
-    project_id = ""
+    project_id = "",
   ) {
     return this.metricsService.dispatch("splashEvent", [
       this.commonUserMetrics,
@@ -82,7 +63,7 @@ export class BehaviourEventHandler {
     space: MetricsEventSpace,
     connection_type: SourceConnectionType,
     file_type: SourceFileType,
-    glob: boolean
+    glob: boolean,
   ) {
     return this.metricsService.dispatch("sourceSuccess", [
       this.commonUserMetrics,
@@ -99,7 +80,7 @@ export class BehaviourEventHandler {
     action: BehaviourEventAction,
     medium: BehaviourEventMedium,
     screen_name: MetricsEventScreenName,
-    space: MetricsEventSpace
+    space: MetricsEventSpace,
   ) {
     return this.metricsService.dispatch("sourceTrigger", [
       this.commonUserMetrics,
@@ -107,6 +88,24 @@ export class BehaviourEventHandler {
       medium,
       screen_name,
       space,
+    ]);
+  }
+
+  public fireDeployEvent(action: BehaviourEventAction) {
+    return this.metricsService.dispatch("deployEvent", [
+      this.commonUserMetrics,
+      action,
+    ]);
+  }
+
+  public fireGithubIntentEvent(
+    action: BehaviourEventAction,
+    githubFields?: GithubEventFields,
+  ) {
+    return this.metricsService.dispatch("githubIntent", [
+      this.commonUserMetrics,
+      action,
+      githubFields,
     ]);
   }
 }

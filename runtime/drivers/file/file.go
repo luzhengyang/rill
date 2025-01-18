@@ -2,6 +2,7 @@ package file
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,7 +12,9 @@ import (
 	"github.com/rilldata/rill/runtime/drivers"
 	"github.com/rilldata/rill/runtime/pkg/activity"
 	"github.com/rilldata/rill/runtime/pkg/fileutil"
+	"github.com/rilldata/rill/runtime/storage"
 	"go.uber.org/zap"
+	"gopkg.in/yaml.v3"
 )
 
 func init() {
@@ -23,7 +26,7 @@ func init() {
 var spec = drivers.Spec{
 	DisplayName: "Local file",
 	Description: "Import Locally Stored File.",
-	SourceProperties: []drivers.PropertySchema{
+	SourceProperties: []*drivers.PropertySpec{
 		{
 			Key:         "path",
 			Type:        drivers.StringPropertyType,
@@ -41,22 +44,35 @@ var spec = drivers.Spec{
 			Placeholder: "csv",
 		},
 	},
+	ImplementsFileStore: true,
 }
 
 type driver struct {
 	name string
 }
 
-func (d driver) Open(config map[string]any, shared bool, client activity.Client, logger *zap.Logger) (drivers.Handle, error) {
-	if shared {
-		return nil, fmt.Errorf("file driver can't be shared")
-	}
-	dsn, ok := config["dsn"].(string)
-	if !ok {
-		return nil, fmt.Errorf("require dsn to open file connection")
+type configProperties struct {
+	DSN             string `mapstructure:"dsn"`
+	AllowHostAccess bool   `mapstructure:"allow_host_access"`
+}
+
+// a smaller subset of relevant parts of rill.yaml
+type rillYAML struct {
+	IgnorePaths []string `yaml:"ignore_paths"`
+}
+
+func (d driver) Open(instanceID string, config map[string]any, st *storage.Client, ac *activity.Client, logger *zap.Logger) (drivers.Handle, error) {
+	if instanceID == "" {
+		return nil, errors.New("file driver can't be shared")
 	}
 
-	path, err := fileutil.ExpandHome(dsn)
+	conf := &configProperties{}
+	err := mapstructure.WeakDecode(config, conf)
+	if err != nil {
+		return nil, err
+	}
+
+	path, err := fileutil.ExpandHome(conf.DSN)
 	if err != nil {
 		return nil, err
 	}
@@ -67,19 +83,26 @@ func (d driver) Open(config map[string]any, shared bool, client activity.Client,
 	}
 
 	c := &connection{
+		logger:       logger,
 		root:         absPath,
-		driverConfig: config,
+		driverConfig: conf,
 		driverName:   d.name,
-		shared:       shared,
 	}
 	if err := c.checkRoot(); err != nil {
 		return nil, err
 	}
-	return c, nil
-}
 
-func (d driver) Drop(config map[string]any, logger *zap.Logger) error {
-	return drivers.ErrDropNotSupported
+	// Read rill.yaml and fill in `ignore_paths`
+	rawYaml, err := c.Get(context.Background(), "/rill.yaml")
+	if err == nil {
+		yml := &rillYAML{}
+		err = yaml.Unmarshal([]byte(rawYaml), yml)
+		if err == nil {
+			c.ignorePaths = yml.IgnorePaths
+		}
+	}
+
+	return c, nil
 }
 
 func (d driver) Spec() drivers.Spec {
@@ -110,20 +133,29 @@ func parseSourceProperties(props map[string]any) (*sourceProperties, error) {
 }
 
 type connection struct {
+	logger *zap.Logger
 	// root should be absolute path
 	root         string
-	driverConfig map[string]any
+	driverConfig *configProperties
 	driverName   string
-	shared       bool
 
 	watcherMu    sync.Mutex
 	watcherCount int
 	watcher      *watcher
+
+	ignorePaths []string
+}
+
+// Ping implements drivers.Handle.
+func (c *connection) Ping(ctx context.Context) error {
+	return drivers.ErrNotImplemented
 }
 
 // Config implements drivers.Connection.
 func (c *connection) Config() map[string]any {
-	return c.driverConfig
+	m := make(map[string]any, 0)
+	_ = mapstructure.Decode(c.driverConfig, &m)
+	return m
 }
 
 // Close implements drivers.Connection.
@@ -143,14 +175,16 @@ func (c *connection) AsCatalogStore(instanceID string) (drivers.CatalogStore, bo
 
 // AsRepoStore implements drivers.Connection.
 func (c *connection) AsRepoStore(instanceID string) (drivers.RepoStore, bool) {
-	if c.shared {
-		return nil, false
-	}
 	return c, true
 }
 
 // AsAdmin implements drivers.Handle.
 func (c *connection) AsAdmin(instanceID string) (drivers.AdminService, bool) {
+	return nil, false
+}
+
+// AsAI implements drivers.Handle.
+func (c *connection) AsAI(instanceID string) (drivers.AIService, bool) {
 	return nil, false
 }
 
@@ -174,6 +208,21 @@ func (c *connection) AsObjectStore() (drivers.ObjectStore, bool) {
 	return nil, false
 }
 
+// AsModelExecutor implements drivers.Handle.
+func (c *connection) AsModelExecutor(instanceID string, opts *drivers.ModelExecutorOptions) (drivers.ModelExecutor, bool) {
+	if opts.OutputHandle == c {
+		if olap, ok := opts.InputHandle.AsOLAP(instanceID); ok {
+			return &olapToSelfExecutor{c, olap}, true
+		}
+	}
+	return nil, false
+}
+
+// AsModelManager implements drivers.Handle.
+func (c *connection) AsModelManager(instanceID string) (drivers.ModelManager, bool) {
+	return nil, false
+}
+
 // AsTransporter implements drivers.Connection.
 func (c *connection) AsTransporter(from, to drivers.Handle) (drivers.Transporter, bool) {
 	return nil, false
@@ -184,9 +233,14 @@ func (c *connection) AsFileStore() (drivers.FileStore, bool) {
 	return c, true
 }
 
-// AsSQLStore implements drivers.Connection.
-func (c *connection) AsSQLStore() (drivers.SQLStore, bool) {
+// AsWarehouse implements drivers.Handle.
+func (c *connection) AsWarehouse() (drivers.Warehouse, bool) {
 	return nil, false
+}
+
+// AsNotifier implements drivers.Connection.
+func (c *connection) AsNotifier(properties map[string]any) (drivers.Notifier, error) {
+	return nil, drivers.ErrNotNotifier
 }
 
 // checkPath checks that the connection's root is a valid directory.

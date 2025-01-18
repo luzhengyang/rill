@@ -7,6 +7,8 @@ import { cubicOut as easing } from "svelte/easing";
 
 export const DEFAULT_INSPECTOR_WIDTH = 360;
 export const DEFAULT_NAV_WIDTH = 240;
+export const MIN_NAV_WIDTH = 180;
+export const MAX_NAV_WIDTH = 360;
 export const DEFAULT_PREVIEW_TABLE_HEIGHT = 400;
 
 /** parameters used in the column profile view & elsewhere */
@@ -30,9 +32,6 @@ export function collapseInspectorCTAButton(width) {
   return !(width < 398);
 }
 
-/** layout constants  */
-export const SIDE_PAD = 0;
 export const SURFACE_SLIDE_DURATION = 400;
 export const LIST_SLIDE_DURATION = 200;
 export const SURFACE_SLIDE_EASING = easing;
-export const SURFACE_DRAG_DURATION = 50;

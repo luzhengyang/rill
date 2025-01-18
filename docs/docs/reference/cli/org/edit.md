@@ -13,14 +13,17 @@ rill org edit [<org-name>] [flags]
 ### Flags
 
 ```
-      --org string           Organization name
-      --description string   Description
+      --org string             Organization name
+      --display-name string    Display name
+      --description string     Description
+      --billing-email string   Billing email
 ```
 
 ### Global flags
 
 ```
-      --api-token string   Token for authenticating with the admin API
+      --api-token string   Token for authenticating with the cloud API
+      --format string      Output format (options: "human", "json", "csv") (default "human")
   -h, --help               Print usage
       --interactive        Prompt for missing required parameters (default true)
 ```

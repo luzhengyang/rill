@@ -4,8 +4,10 @@
     formatInteger,
     timePortion,
   } from "@rilldata/web-common/lib/formatters";
-  import type { ScaleLinear } from "d3-scale";
+  import { timeGrainToDuration } from "@rilldata/web-common/lib/time/grains";
   import { removeLocalTimezoneOffset } from "@rilldata/web-common/lib/time/timezone";
+  import type { V1TimeGrain } from "@rilldata/web-common/runtime-client";
+  import type { ScaleLinear } from "d3-scale";
   import { getContext } from "svelte";
   import type { Writable } from "svelte/store";
   import { fly } from "svelte/transition";
@@ -13,19 +15,23 @@
   import type { PlotConfig } from "../../utils";
 
   const X: Writable<ScaleLinear<number, number>> = getContext(
-    "rill:data-graphic:X"
+    "rill:data-graphic:X",
   );
   const Y: Writable<ScaleLinear<number, number>> = getContext(
-    "rill:data-graphic:Y"
+    "rill:data-graphic:Y",
   );
   const config: Writable<PlotConfig> = getContext(
-    "rill:data-graphic:plot-config"
+    "rill:data-graphic:plot-config",
   );
 
   export let point;
   export let xAccessor: string;
   export let yAccessor: string;
-  $: xLabel = removeLocalTimezoneOffset(point[xAccessor]);
+  export let grain: V1TimeGrain;
+  $: xLabel = removeLocalTimezoneOffset(
+    point[xAccessor],
+    timeGrainToDuration(grain),
+  );
 </script>
 
 <g>

@@ -19,6 +19,30 @@ func (s *Service) OrganizationPermissionsForUser(ctx context.Context, orgID, use
 		composite = unionOrgRoles(composite, role)
 	}
 
+	// If the org has a public project, all users get read access to it.
+	if !composite.ReadOrg {
+		ok, err := s.DB.CheckOrganizationHasPublicProjects(ctx, orgID)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			composite.ReadOrg = true
+			composite.ReadProjects = true
+		}
+	}
+
+	// If the user is an outside member of one of the org's projects, they get read access to org as well.
+	if !composite.ReadOrg {
+		ok, err := s.DB.CheckOrganizationHasOutsideUser(ctx, orgID, userID)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			composite.ReadOrg = true
+			composite.ReadProjects = true
+		}
+	}
+
 	return composite, nil
 }
 
@@ -52,23 +76,54 @@ func (s *Service) OrganizationPermissionsForDeployment(ctx context.Context, orgI
 	return &adminv1.OrganizationPermissions{}, nil
 }
 
+// OrganizationPermissionsForMagicAuthToken resolves organization permissions for a magic auth token in the specified project.
+// It grants basic read access to only the org of the project the token belongs to.
+func (s *Service) OrganizationPermissionsForMagicAuthToken(ctx context.Context, orgID, tokenProjectID string) (*adminv1.OrganizationPermissions, error) {
+	proj, err := s.DB.FindProject(ctx, tokenProjectID)
+	if err != nil {
+		return nil, err
+	}
+
+	if orgID == proj.OrganizationID {
+		return &adminv1.OrganizationPermissions{
+			ReadOrg:          true,
+			ManageOrg:        false,
+			ReadProjects:     false,
+			CreateProjects:   false,
+			ManageProjects:   false,
+			ReadOrgMembers:   false,
+			ManageOrgMembers: false,
+		}, nil
+	}
+
+	return &adminv1.OrganizationPermissions{}, nil
+}
+
 // ProjectPermissionsForUser resolves project permissions for a user.
 func (s *Service) ProjectPermissionsForUser(ctx context.Context, projectID, userID string, orgPerms *adminv1.OrganizationPermissions) (*adminv1.ProjectPermissions, error) {
 	// ManageProjects permission on the org gives full access to all projects in the org (only org admins have this)
 	if orgPerms.ManageProjects {
 		return &adminv1.ProjectPermissions{
-			ReadProject:          true,
-			ManageProject:        true,
-			ReadProd:             true,
-			ReadProdStatus:       true,
-			ManageProd:           true,
-			ReadDev:              true,
-			ReadDevStatus:        true,
-			ManageDev:            true,
-			ReadProjectMembers:   true,
-			ManageProjectMembers: true,
-			CreateReports:        true,
-			ManageReports:        true,
+			ReadProject:                true,
+			ManageProject:              true,
+			ReadProd:                   true,
+			ReadProdStatus:             true,
+			ManageProd:                 true,
+			ReadDev:                    true,
+			ReadDevStatus:              true,
+			ManageDev:                  true,
+			ReadProvisionerResources:   true,
+			ManageProvisionerResources: true,
+			ReadProjectMembers:         true,
+			ManageProjectMembers:       true,
+			CreateMagicAuthTokens:      true,
+			ManageMagicAuthTokens:      true,
+			CreateReports:              true,
+			ManageReports:              true,
+			CreateAlerts:               true,
+			ManageAlerts:               true,
+			CreateBookmarks:            true,
+			ManageBookmarks:            true,
 		}, nil
 	}
 
@@ -90,18 +145,26 @@ func (s *Service) ProjectPermissionsForUser(ctx context.Context, projectID, user
 func (s *Service) ProjectPermissionsForService(ctx context.Context, projectID, serviceID string, orgPerms *adminv1.OrganizationPermissions) (*adminv1.ProjectPermissions, error) {
 	if orgPerms.ManageProjects {
 		return &adminv1.ProjectPermissions{
-			ReadProject:          true,
-			ManageProject:        true,
-			ReadProd:             true,
-			ReadProdStatus:       true,
-			ManageProd:           true,
-			ReadDev:              true,
-			ReadDevStatus:        true,
-			ManageDev:            true,
-			ReadProjectMembers:   true,
-			ManageProjectMembers: true,
-			CreateReports:        true,
-			ManageReports:        true,
+			ReadProject:                true,
+			ManageProject:              true,
+			ReadProd:                   true,
+			ReadProdStatus:             true,
+			ManageProd:                 true,
+			ReadDev:                    true,
+			ReadDevStatus:              true,
+			ManageDev:                  true,
+			ReadProvisionerResources:   true,
+			ManageProvisionerResources: true,
+			ReadProjectMembers:         true,
+			ManageProjectMembers:       true,
+			CreateMagicAuthTokens:      true,
+			ManageMagicAuthTokens:      true,
+			CreateReports:              true,
+			ManageReports:              true,
+			CreateAlerts:               true,
+			ManageAlerts:               true,
+			CreateBookmarks:            true,
+			ManageBookmarks:            true,
 		}, nil
 	}
 
@@ -119,22 +182,62 @@ func (s *Service) ProjectPermissionsForDeployment(ctx context.Context, projectID
 	// Deployments get full read and no write permissions on the project they belong to
 	if projectID == depl.ProjectID {
 		return &adminv1.ProjectPermissions{
-			ReadProject:          true,
-			ManageProject:        false,
-			ReadProd:             true,
-			ReadProdStatus:       true,
-			ManageProd:           false,
-			ReadDev:              true,
-			ReadDevStatus:        true,
-			ManageDev:            false,
-			ReadProjectMembers:   true,
-			ManageProjectMembers: false,
-			CreateReports:        false,
-			ManageReports:        false,
+			ReadProject:                true,
+			ManageProject:              false,
+			ReadProd:                   true,
+			ReadProdStatus:             true,
+			ManageProd:                 false,
+			ReadDev:                    true,
+			ReadDevStatus:              true,
+			ManageDev:                  false,
+			ReadProvisionerResources:   true,
+			ManageProvisionerResources: true,
+			ReadProjectMembers:         true,
+			ManageProjectMembers:       false,
+			CreateMagicAuthTokens:      false,
+			ManageMagicAuthTokens:      false,
+			CreateReports:              false,
+			ManageReports:              false,
+			CreateAlerts:               false,
+			ManageAlerts:               false,
+			CreateBookmarks:            false,
+			ManageBookmarks:            false,
 		}, nil
 	}
 
 	return &adminv1.ProjectPermissions{}, nil
+}
+
+// ProjectPermissionsForMagicAuthToken resolves project permissions for a magic auth token.
+func (s *Service) ProjectPermissionsForMagicAuthToken(ctx context.Context, projectID string, tkn *database.MagicAuthToken) (*adminv1.ProjectPermissions, error) {
+	// No access if the token belongs to another project
+	if projectID != tkn.ProjectID {
+		return &adminv1.ProjectPermissions{}, nil
+	}
+
+	// Grant basic read access to the project and its prod deployment
+	return &adminv1.ProjectPermissions{
+		ReadProject:                true,
+		ManageProject:              false,
+		ReadProd:                   true,
+		ReadProdStatus:             false,
+		ManageProd:                 false,
+		ReadDev:                    false,
+		ReadDevStatus:              false,
+		ManageDev:                  false,
+		ReadProvisionerResources:   false,
+		ManageProvisionerResources: false,
+		ReadProjectMembers:         false,
+		ManageProjectMembers:       false,
+		CreateMagicAuthTokens:      false,
+		ManageMagicAuthTokens:      false,
+		CreateReports:              false,
+		ManageReports:              false,
+		CreateAlerts:               false,
+		ManageAlerts:               false,
+		CreateBookmarks:            false,
+		ManageBookmarks:            false,
+	}, nil
 }
 
 func unionOrgRoles(a *adminv1.OrganizationPermissions, b *database.OrganizationRole) *adminv1.OrganizationPermissions {
@@ -151,17 +254,25 @@ func unionOrgRoles(a *adminv1.OrganizationPermissions, b *database.OrganizationR
 
 func unionProjectRoles(a *adminv1.ProjectPermissions, b *database.ProjectRole) *adminv1.ProjectPermissions {
 	return &adminv1.ProjectPermissions{
-		ReadProject:          a.ReadProject || b.ReadProject,
-		ManageProject:        a.ManageProject || b.ManageProject,
-		ReadProd:             a.ReadProd || b.ReadProd,
-		ReadProdStatus:       a.ReadProdStatus || b.ReadProdStatus,
-		ManageProd:           a.ManageProd || b.ManageProd,
-		ReadDev:              a.ReadDev || b.ReadDev,
-		ReadDevStatus:        a.ReadDevStatus || b.ReadDevStatus,
-		ManageDev:            a.ManageDev || b.ManageDev,
-		ReadProjectMembers:   a.ReadProjectMembers || b.ReadProjectMembers,
-		ManageProjectMembers: a.ManageProjectMembers || b.ManageProjectMembers,
-		CreateReports:        a.CreateReports || b.CreateReports,
-		ManageReports:        a.ManageReports || b.ManageReports,
+		ReadProject:                a.ReadProject || b.ReadProject,
+		ManageProject:              a.ManageProject || b.ManageProject,
+		ReadProd:                   a.ReadProd || b.ReadProd,
+		ReadProdStatus:             a.ReadProdStatus || b.ReadProdStatus,
+		ManageProd:                 a.ManageProd || b.ManageProd,
+		ReadDev:                    a.ReadDev || b.ReadDev,
+		ReadDevStatus:              a.ReadDevStatus || b.ReadDevStatus,
+		ManageDev:                  a.ManageDev || b.ManageDev,
+		ReadProvisionerResources:   a.ReadProvisionerResources || b.ReadProvisionerResources,
+		ManageProvisionerResources: a.ManageProvisionerResources || b.ManageProvisionerResources,
+		ReadProjectMembers:         a.ReadProjectMembers || b.ReadProjectMembers,
+		ManageProjectMembers:       a.ManageProjectMembers || b.ManageProjectMembers,
+		CreateMagicAuthTokens:      a.CreateMagicAuthTokens || b.CreateMagicAuthTokens,
+		ManageMagicAuthTokens:      a.ManageMagicAuthTokens || b.ManageMagicAuthTokens,
+		CreateReports:              a.CreateReports || b.CreateReports,
+		ManageReports:              a.ManageReports || b.ManageReports,
+		CreateAlerts:               a.CreateAlerts || b.CreateAlerts,
+		ManageAlerts:               a.ManageAlerts || b.ManageAlerts,
+		CreateBookmarks:            a.CreateBookmarks || b.CreateBookmarks,
+		ManageBookmarks:            a.ManageBookmarks || b.ManageBookmarks,
 	}
 }

@@ -1,8 +1,6 @@
 package duckdb
 
 import (
-	"database/sql"
-	"database/sql/driver"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,24 +9,6 @@ import (
 	"github.com/mitchellh/mapstructure"
 	"github.com/rilldata/rill/runtime/drivers"
 )
-
-// rawConn is similar to *sql.Conn.Raw, but additionally unwraps otelsql (which we use for instrumentation).
-func rawConn(conn *sql.Conn, f func(driver.Conn) error) error {
-	return conn.Raw(func(raw any) error {
-		// For details, see: https://github.com/XSAM/otelsql/issues/98
-		if c, ok := raw.(interface{ Raw() driver.Conn }); ok {
-			raw = c.Raw()
-		}
-
-		// This is currently guaranteed, but adding check to be safe
-		driverConn, ok := raw.(driver.Conn)
-		if !ok {
-			return fmt.Errorf("internal: did not obtain a driver.Conn")
-		}
-
-		return f(driverConn)
-	})
-}
 
 type sinkProperties struct {
 	Table string `mapstructure:"table"`
@@ -43,14 +23,22 @@ func parseSinkProperties(props map[string]any) (*sinkProperties, error) {
 }
 
 type dbSourceProperties struct {
-	Database string `mapstructure:"db"`
-	SQL      string `mapstructure:"sql"`
+	Database    string `mapstructure:"db"`
+	DSN         string `mapstructure:"dsn"`
+	DatabaseURL string `mapstructure:"database_url"`
+	SQL         string `mapstructure:"sql"`
 }
 
 func parseDBSourceProperties(props map[string]any) (*dbSourceProperties, error) {
 	cfg := &dbSourceProperties{}
 	if err := mapstructure.Decode(props, cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse source properties: %w", err)
+	}
+	if cfg.DSN != "" { // For mysql the property is called as dsn
+		cfg.Database = cfg.DSN
+	}
+	if cfg.DatabaseURL != "" { // For postgres the property is called as database_url
+		cfg.Database = cfg.DatabaseURL
 	}
 	if cfg.SQL == "" {
 		return nil, fmt.Errorf("property 'sql' is mandatory")
@@ -245,30 +233,6 @@ func fileSize(paths []string) int64 {
 	return size
 }
 
-func quoteName(name string) string {
-	return fmt.Sprintf("\"%s\"", name)
-}
-
-func escapeDoubleQuotes(column string) string {
-	return strings.ReplaceAll(column, "\"", "\"\"")
-}
-
 func safeName(name string) string {
-	if name == "" {
-		return name
-	}
-	return quoteName(escapeDoubleQuotes(name))
-}
-
-func sizeWithinStorageLimits(olap drivers.OLAPStore, size int64) bool {
-	limit, ok := olap.(drivers.Handle).Config()["storage_limit_bytes"].(int64)
-	if !ok || limit <= 0 { // no limit
-		return true
-	}
-
-	dbSizeInBytes, ok := olap.EstimateSize()
-	if ok && dbSizeInBytes+size > limit {
-		return false
-	}
-	return true
+	return drivers.DialectDuckDB.EscapeIdentifier(name)
 }

@@ -35,9 +35,12 @@ func (c *connection) findInstances(_ context.Context, whereClause string, args .
 	sql := fmt.Sprintf(`
 		SELECT
 			id,
+			environment,
 			olap_connector,
+			project_olap_connector,
 			repo_connector,
 			admin_connector,
+			ai_connector,
 			catalog_connector,
 			created_on,
 			updated_on,
@@ -45,12 +48,11 @@ func (c *connection) findInstances(_ context.Context, whereClause string, args .
 			project_connectors,
 			variables,
 			project_variables,
+			feature_flags,
 			annotations,
 			embed_catalog,
 			watch_repo,
-			stage_changes,
-			model_default_materialize,
-			model_materialize_delay_seconds
+			public_paths
 		FROM instances %s ORDER BY id
 	`, whereClause)
 
@@ -63,13 +65,16 @@ func (c *connection) findInstances(_ context.Context, whereClause string, args .
 	var res []*drivers.Instance
 	for rows.Next() {
 		// sqlite doesn't support maps need to read as bytes and convert to map
-		var variables, projectVariables, annotations, connectors, projectConnectors []byte
+		var variables, projectVariables, featureFlags, annotations, connectors, projectConnectors, publicPaths []byte
 		i := &drivers.Instance{}
 		err := rows.Scan(
 			&i.ID,
+			&i.Environment,
 			&i.OLAPConnector,
+			&i.ProjectOLAPConnector,
 			&i.RepoConnector,
 			&i.AdminConnector,
+			&i.AIConnector,
 			&i.CatalogConnector,
 			&i.CreatedOn,
 			&i.UpdatedOn,
@@ -77,12 +82,11 @@ func (c *connection) findInstances(_ context.Context, whereClause string, args .
 			&projectConnectors,
 			&variables,
 			&projectVariables,
+			&featureFlags,
 			&annotations,
 			&i.EmbedCatalog,
 			&i.WatchRepo,
-			&i.StageChanges,
-			&i.ModelDefaultMaterialize,
-			&i.ModelMaterializeDelaySeconds,
+			&publicPaths,
 		)
 		if err != nil {
 			return nil, err
@@ -98,17 +102,27 @@ func (c *connection) findInstances(_ context.Context, whereClause string, args .
 			return nil, err
 		}
 
-		i.Variables, err = mapFromJSON(variables)
+		i.Variables, err = mapFromJSON[string](variables)
 		if err != nil {
 			return nil, err
 		}
 
-		i.ProjectVariables, err = mapFromJSON(projectVariables)
+		i.ProjectVariables, err = mapFromJSON[string](projectVariables)
 		if err != nil {
 			return nil, err
 		}
 
-		i.Annotations, err = mapFromJSON(annotations)
+		i.FeatureFlags, err = mapFromJSON[bool](featureFlags)
+		if err != nil {
+			return nil, err
+		}
+
+		i.Annotations, err = mapFromJSON[string](annotations)
+		if err != nil {
+			return nil, err
+		}
+
+		i.PublicPaths, err = arrayFromJSON[string](publicPaths)
 		if err != nil {
 			return nil, err
 		}
@@ -149,7 +163,17 @@ func (c *connection) CreateInstance(_ context.Context, inst *drivers.Instance) e
 		return err
 	}
 
+	featureFlags, err := mapToJSON(inst.FeatureFlags)
+	if err != nil {
+		return err
+	}
+
 	annotations, err := mapToJSON(inst.Annotations)
+	if err != nil {
+		return err
+	}
+
+	publicPaths, err := arrayToJSON(inst.PublicPaths)
 	if err != nil {
 		return err
 	}
@@ -160,9 +184,12 @@ func (c *connection) CreateInstance(_ context.Context, inst *drivers.Instance) e
 		`
 		INSERT INTO instances(
 			id,
+			environment,
 			olap_connector,
+			project_olap_connector,
 			repo_connector,
 			admin_connector,
+			ai_connector,
 			catalog_connector,
 			created_on,
 			updated_on,
@@ -170,19 +197,21 @@ func (c *connection) CreateInstance(_ context.Context, inst *drivers.Instance) e
 			project_connectors,
 			variables,
 			project_variables,
+			feature_flags,
 			annotations,
 			embed_catalog,
 			watch_repo,
-			stage_changes,
-			model_default_materialize,
-			model_materialize_delay_seconds
+			public_paths
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
 		`,
 		inst.ID,
+		inst.Environment,
 		inst.OLAPConnector,
+		inst.ProjectOLAPConnector,
 		inst.RepoConnector,
 		inst.AdminConnector,
+		inst.AIConnector,
 		inst.CatalogConnector,
 		now,
 		now,
@@ -190,12 +219,11 @@ func (c *connection) CreateInstance(_ context.Context, inst *drivers.Instance) e
 		projectConnectors,
 		variables,
 		projectVariables,
+		featureFlags,
 		annotations,
 		inst.EmbedCatalog,
 		inst.WatchRepo,
-		inst.StageChanges,
-		inst.ModelDefaultMaterialize,
-		inst.ModelMaterializeDelaySeconds,
+		publicPaths,
 	)
 	if err != nil {
 		return err
@@ -213,21 +241,6 @@ func (c *connection) EditInstance(_ context.Context, inst *drivers.Instance) err
 	ctx := context.Background()
 
 	// sqlite doesn't support maps need to convert to json and write as bytes array
-	variables, err := mapToJSON(inst.Variables)
-	if err != nil {
-		return err
-	}
-
-	projectVariables, err := mapToJSON(inst.ProjectVariables)
-	if err != nil {
-		return err
-	}
-
-	annotations, err := mapToJSON(inst.Annotations)
-	if err != nil {
-		return err
-	}
-
 	connectors, err := json.Marshal(inst.Connectors)
 	if err != nil {
 		return err
@@ -238,44 +251,73 @@ func (c *connection) EditInstance(_ context.Context, inst *drivers.Instance) err
 		return err
 	}
 
+	variables, err := mapToJSON(inst.Variables)
+	if err != nil {
+		return err
+	}
+
+	projectVariables, err := mapToJSON(inst.ProjectVariables)
+	if err != nil {
+		return err
+	}
+
+	featureFlags, err := mapToJSON(inst.FeatureFlags)
+	if err != nil {
+		return err
+	}
+
+	annotations, err := mapToJSON(inst.Annotations)
+	if err != nil {
+		return err
+	}
+
+	publicPaths, err := arrayToJSON(inst.PublicPaths)
+	if err != nil {
+		return err
+	}
+
 	now := time.Now()
 	_, err = c.db.ExecContext(
 		ctx,
 		`
 		UPDATE instances SET
-			olap_connector = $2,
-			repo_connector = $3,
-			admin_connector = $4,
-			catalog_connector = $5,
-			updated_on = $6,
-			connectors = $7,
-			project_connectors = $8,
-			variables = $9,
-			project_variables = $10,
-			annotations = $11,
-			embed_catalog = $12,
-			watch_repo = $13,
-			stage_changes = $14,
-			model_default_materialize = $15,
-			model_materialize_delay_seconds = $16
+			environment = $2,
+			olap_connector = $3,
+			project_olap_connector = $4,
+			repo_connector = $5,
+			admin_connector = $6,
+			ai_connector = $7,
+			catalog_connector = $8,
+			updated_on = $9,
+			connectors = $10,
+			project_connectors = $11,
+			variables = $12,
+			project_variables = $13,
+			feature_flags = $14,
+			annotations = $15,
+			embed_catalog = $16,
+			watch_repo = $17,
+			public_paths = $18
 		WHERE id = $1
 		`,
 		inst.ID,
+		inst.Environment,
 		inst.OLAPConnector,
+		inst.ProjectOLAPConnector,
 		inst.RepoConnector,
 		inst.AdminConnector,
+		inst.AIConnector,
 		inst.CatalogConnector,
 		now,
 		connectors,
 		projectConnectors,
 		variables,
 		projectVariables,
+		featureFlags,
 		annotations,
 		inst.EmbedCatalog,
 		inst.WatchRepo,
-		inst.StageChanges,
-		inst.ModelDefaultMaterialize,
-		inst.ModelMaterializeDelaySeconds,
+		publicPaths,
 	)
 	if err != nil {
 		return err
@@ -295,17 +337,30 @@ func (c *connection) DeleteInstance(_ context.Context, id string) error {
 	return err
 }
 
-func mapToJSON(data map[string]string) ([]byte, error) {
+func mapToJSON[T any](data map[string]T) ([]byte, error) {
 	return json.Marshal(data)
 }
 
-func mapFromJSON(data []byte) (map[string]string, error) {
+func mapFromJSON[T any](data []byte) (map[string]T, error) {
 	if len(data) == 0 {
-		return map[string]string{}, nil
+		return map[string]T{}, nil
 	}
-	var m map[string]string
+	var m map[string]T
 	err := json.Unmarshal(data, &m)
 	return m, err
+}
+
+func arrayToJSON[T any](data []T) ([]byte, error) {
+	return json.Marshal(data)
+}
+
+func arrayFromJSON[T any](data []byte) ([]T, error) {
+	if len(data) == 0 {
+		return []T{}, nil
+	}
+	var a []T
+	err := json.Unmarshal(data, &a)
+	return a, err
 }
 
 func unmarshalConnectors(s []byte) ([]*runtimev1.Connector, error) {

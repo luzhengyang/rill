@@ -11,26 +11,86 @@ import (
 
 func AddCmd(ch *cmdutil.Helper) *cobra.Command {
 	var projectName string
+	var group string
 	var email string
 	var role string
-	cfg := ch.Config
 
 	addCmd := &cobra.Command{
 		Use:   "add",
-		Short: "Add",
+		Short: "Add user to a project, organization or group",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cmdutil.SelectPromptIfEmpty(&role, "Select role", userRoles, "")
-			cmdutil.StringPromptIfEmpty(&email, "Enter email")
+			if group == "" {
+				err := cmdutil.SelectPromptIfEmpty(&role, "Select role", userRoles, "")
+				if err != nil {
+					return err
+				}
+			}
 
-			client, err := cmdutil.Client(cfg)
+			err := cmdutil.StringPromptIfEmpty(&email, "Enter email")
 			if err != nil {
 				return err
 			}
-			defer client.Close()
 
-			if projectName != "" {
-				res, err := client.AddProjectMember(cmd.Context(), &adminv1.AddProjectMemberRequest{
-					Organization: cfg.Org,
+			client, err := ch.Client()
+			if err != nil {
+				return err
+			}
+
+			if group != "" {
+				_, err = client.AddUsergroupMemberUser(cmd.Context(), &adminv1.AddUsergroupMemberUserRequest{
+					Organization: ch.Org,
+					Usergroup:    group,
+					Email:        email,
+				})
+				if err != nil {
+					if !strings.Contains(err.Error(), "user is not a member of the org") {
+						return err
+					}
+					// ask if user should be added to the organization
+					ok, err := cmdutil.ConfirmPrompt(fmt.Sprintf("The user must be a member of %q to join one of its groups. Do you want to invite the user to join %q?", ch.Org, ch.Org), "", false)
+					if err != nil {
+						return err
+					}
+					if !ok {
+						ch.PrintfWarn("Aborted, user needs to be part of the organization to be added to the user group\n")
+						return nil
+					}
+					if role == "" {
+						role = "viewer"
+					}
+					res, err := client.AddOrganizationMemberUser(cmd.Context(), &adminv1.AddOrganizationMemberUserRequest{
+						Organization: ch.Org,
+						Email:        email,
+						Role:         role,
+					})
+					if err != nil {
+						return err
+					}
+
+					if res.PendingSignup {
+						ch.PrintfSuccess("Invitation sent to %q to join organization %q as %q\n", email, ch.Org, role)
+					} else {
+						ch.PrintfSuccess("User %q added to the organization %q as %q\n", email, ch.Org, role)
+					}
+
+					// User is added or invite to the org, now add the user again to the group
+					_, err = client.AddUsergroupMemberUser(cmd.Context(), &adminv1.AddUsergroupMemberUserRequest{
+						Organization: ch.Org,
+						Usergroup:    group,
+						Email:        email,
+					})
+					if err != nil {
+						return err
+					}
+
+					ch.PrintfSuccess("User %q added to the user group %q\n", email, group)
+					return nil
+				}
+
+				ch.PrintfSuccess("User %q added to the user group %q\n", email, group)
+			} else if projectName != "" {
+				res, err := client.AddProjectMemberUser(cmd.Context(), &adminv1.AddProjectMemberUserRequest{
+					Organization: ch.Org,
 					Project:      projectName,
 					Email:        email,
 					Role:         role,
@@ -40,13 +100,13 @@ func AddCmd(ch *cmdutil.Helper) *cobra.Command {
 				}
 
 				if res.PendingSignup {
-					ch.Printer.PrintlnSuccess(fmt.Sprintf("Invitation sent to %q to join project \"%s/%s\" as %q", email, cfg.Org, projectName, role))
+					ch.PrintfSuccess("Invitation sent to %q to join project \"%s/%s\" as %q\n", email, ch.Org, projectName, role)
 				} else {
-					ch.Printer.PrintlnSuccess(fmt.Sprintf("User %q added to the project \"%s/%s\" as %q", email, cfg.Org, projectName, role))
+					ch.PrintfSuccess("User %q added to the project \"%s/%s\" as %q\n", email, ch.Org, projectName, role)
 				}
 			} else {
-				res, err := client.AddOrganizationMember(cmd.Context(), &adminv1.AddOrganizationMemberRequest{
-					Organization: cfg.Org,
+				res, err := client.AddOrganizationMemberUser(cmd.Context(), &adminv1.AddOrganizationMemberUserRequest{
+					Organization: ch.Org,
 					Email:        email,
 					Role:         role,
 				})
@@ -55,9 +115,9 @@ func AddCmd(ch *cmdutil.Helper) *cobra.Command {
 				}
 
 				if res.PendingSignup {
-					ch.Printer.PrintlnSuccess(fmt.Sprintf("Invitation sent to %q to join organization %q as %q", email, cfg.Org, role))
+					ch.PrintfSuccess("Invitation sent to %q to join organization %q as %q\n", email, ch.Org, role)
 				} else {
-					ch.Printer.PrintlnSuccess(fmt.Sprintf("User %q added to the organization %q as %q", email, cfg.Org, role))
+					ch.PrintfSuccess("User %q added to the organization %q as %q\n", email, ch.Org, role)
 				}
 			}
 
@@ -65,10 +125,11 @@ func AddCmd(ch *cmdutil.Helper) *cobra.Command {
 		},
 	}
 
-	addCmd.Flags().StringVar(&cfg.Org, "org", cfg.Org, "Organization")
+	addCmd.Flags().StringVar(&ch.Org, "org", ch.Org, "Organization")
 	addCmd.Flags().StringVar(&projectName, "project", "", "Project")
+	addCmd.Flags().StringVar(&group, "group", "", "User group")
 	addCmd.Flags().StringVar(&email, "email", "", "Email of the user")
-	addCmd.Flags().StringVar(&role, "role", "", fmt.Sprintf("Role of the user [%v]", strings.Join(userRoles, ", ")))
+	addCmd.Flags().StringVar(&role, "role", "", fmt.Sprintf("Role of the user (options: %s)", strings.Join(userRoles, ", ")))
 
 	return addCmd
 }

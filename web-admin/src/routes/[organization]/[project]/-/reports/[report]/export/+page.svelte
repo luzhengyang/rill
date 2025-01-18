@@ -1,52 +1,47 @@
 <script lang="ts">
-  import { goto } from "$app/navigation";
   import { page } from "$app/stores";
   import { createDownloadReportMutation } from "@rilldata/web-admin/features/projects/download-report";
   import CtaButton from "@rilldata/web-common/components/calls-to-action/CTAButton.svelte";
   import CtaContentContainer from "@rilldata/web-common/components/calls-to-action/CTAContentContainer.svelte";
   import CtaLayoutContainer from "@rilldata/web-common/components/calls-to-action/CTALayoutContainer.svelte";
   import CtaMessage from "@rilldata/web-common/components/calls-to-action/CTAMessage.svelte";
-  import type { V1ExportFormat } from "@rilldata/web-common/runtime-client";
+  import { V1ExportFormat } from "@rilldata/web-common/runtime-client";
   import { runtime } from "@rilldata/web-common/runtime-client/runtime-store";
 
+  $: ({ instanceId } = $runtime);
   $: organization = $page.params.organization;
   $: project = $page.params.project;
   $: reportId = $page.params.report;
   $: format = $page.url.searchParams.get("format");
-  $: bakedQuery = $page.url.searchParams.get("query");
   $: limit = $page.url.searchParams.get("limit");
+  $: executionTime = $page.url.searchParams.get("execution_time");
+  $: token = $page.url.searchParams.get("token");
 
   const downloadReportMutation = createDownloadReportMutation();
   let downloadOnce = false;
 
-  function triggerDownload() {
+  async function triggerDownload() {
     if (downloadOnce) return;
     downloadOnce = true;
-    $downloadReportMutation.mutateAsync({
+    await $downloadReportMutation.mutateAsync({
       data: {
-        instanceId: $runtime.instanceId,
-        format: format as V1ExportFormat,
-        bakedQuery,
+        instanceId,
+        reportId,
+        format: (format as V1ExportFormat) ?? V1ExportFormat.EXPORT_FORMAT_CSV,
+        executionTime,
         limit,
       },
     });
   }
 
-  $: if (reportId && format && bakedQuery && $runtime) {
+  $: if (reportId && $runtime) {
     triggerDownload();
   }
 
   let error: string;
-  $: {
-    if (!format) {
-      error = "format is required";
-    } else if (!bakedQuery) {
-      error = "query is required";
-    } else if ($downloadReportMutation.error) {
-      error =
-        $downloadReportMutation.error.response?.data?.message ??
-        "unknown error";
-    }
+  $: if ($downloadReportMutation.error) {
+    error =
+      $downloadReportMutation.error.response?.data?.message ?? "unknown error";
   }
 </script>
 
@@ -67,11 +62,14 @@
         </CtaMessage>
       </div>
     {/if}
-    <CtaButton
-      on:click={() => goto(`/${organization}/${project}/-/reports/${reportId}`)}
-      variant="primary-outline"
-    >
-      Go to report page
-    </CtaButton>
+    <!-- User accessing with token wont have access to view report. So only show for other rows. -->
+    {#if !token}
+      <CtaButton
+        variant="secondary"
+        href={`/${organization}/${project}/-/reports/${reportId}`}
+      >
+        Go to report page
+      </CtaButton>
+    {/if}
   </CtaContentContainer>
 </CtaLayoutContainer>

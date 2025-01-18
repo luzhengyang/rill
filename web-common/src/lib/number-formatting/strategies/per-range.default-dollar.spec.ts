@@ -1,6 +1,7 @@
+import { describe, expect, it } from "vitest";
+import { NumberKind } from "../humanizer-types";
 import { PerRangeFormatter } from "./per-range";
-import { defaultDollarOptions } from "./per-range-default-options";
-import { describe, it, expect } from "vitest";
+import { defaultCurrencyOptions } from "./per-range-default-options";
 
 const defaultDollarTestCases: [number, string][] = [
   // integers
@@ -66,11 +67,11 @@ const defaultDollarTestCases: [number, string][] = [
   [0.095, "$0.10"],
   [0.0095, "$0.01"],
   [0.001, "$1.0e-3"],
-  [0.00095, "$950.0e-6"],
+  [0.00095, "$9.5e-4"],
   [0.000999999, "$1.0e-3"],
-  [0.00012335234, "$123.4e-6"],
+  [0.00012335234, "$1.2e-4"],
   [0.000_000_999999, "$1.0e-6"],
-  [0.000_000_02341253, "$23.4e-9"],
+  [0.000_000_02341253, "$2.3e-8"],
   [0.000_000_000_999999, "$1.0e-9"],
 
   // padding with insignificant zeros for small nums
@@ -89,7 +90,9 @@ const defaultDollarTestCases: [number, string][] = [
 describe("range formatter, using default options for NumberKind.DOLLAR nums, `.stringFormat()`", () => {
   defaultDollarTestCases.forEach(([input, output]) => {
     it(`returns the correct string in case: ${input}`, () => {
-      const formatter = new PerRangeFormatter([input], defaultDollarOptions);
+      const formatter = new PerRangeFormatter(
+        defaultCurrencyOptions(NumberKind.DOLLAR),
+      );
       expect(formatter.stringFormat(input)).toEqual(output);
     });
   });

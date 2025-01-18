@@ -24,7 +24,7 @@ function newEditorView(content: string, parent: HTMLElement) {
 /** convenience function for selecting the gutter elements */
 function getLines(container: HTMLElement) {
   return container.querySelectorAll(
-    `.cm-content > .cm-line`
+    `.cm-content > .cm-line`,
   ) as NodeListOf<HTMLElement>;
 }
 
@@ -48,7 +48,7 @@ describe("Line Status BG Highlighter Extension (CodeMirror)", () => {
   });
 
   it("renders a set of line statuses & correctly updates them", () => {
-    setLineStatuses([{ line: 2, level: "error" }], view);
+    setLineStatuses([{ line: 2, level: "error" }], view, false);
     let lines = getLines(container);
     expect(lines[1].className.includes("cm-line-error")).toBe(true);
 
@@ -58,32 +58,33 @@ describe("Line Status BG Highlighter Extension (CodeMirror)", () => {
         { line: 1, level: "error" },
         { line: 3, level: "error" },
       ],
-      view
+      view,
+      false,
     );
     lines = getLines(container);
     Array.from(lines).forEach((line, i) => {
       expect(line.className.includes("cm-line-error")).toBe(
-        i === 0 || i === 2 ? true : false
+        i === 0 || i === 2 ? true : false,
       );
     });
 
     // remove all line statuses.
-    setLineStatuses([], view);
+    setLineStatuses([], view, false);
     lines = getLines(container);
     expect(
       Array.from(lines).every(
-        (line) => !line.className.includes("cm-line-error")
-      )
+        (line) => !line.className.includes("cm-line-error"),
+      ),
     ).toBe(true);
   });
 
   it("does not render line statuses whose line number is greater than the number of lines in the doc", () => {
-    setLineStatuses([{ line: 100, level: "error" }], view);
+    setLineStatuses([{ line: 100, level: "error" }], view, false);
     const lines = getLines(container);
     expect(
       Array.from(lines).every(
-        (line) => !line.className.includes("cm-line-error")
-      )
+        (line) => !line.className.includes("cm-line-error"),
+      ),
     ).toBe(true);
   });
 });

@@ -33,6 +33,7 @@ export interface HTTPErrorEvent extends MetricsEvent {
   api: string;
   status: string;
   message: string;
+  page_url: string;
 }
 
 export interface JavascriptErrorEvent extends MetricsEvent {
@@ -40,6 +41,7 @@ export interface JavascriptErrorEvent extends MetricsEvent {
   screen_name: MetricsEventScreenName;
   stack: string;
   message: string;
+  page_url: string;
 }
 
 export class ErrorEventFactory extends MetricsEventFactory {
@@ -51,12 +53,13 @@ export class ErrorEventFactory extends MetricsEventFactory {
     error_code: SourceErrorCodes,
     connection_type: SourceConnectionType,
     file_type: SourceFileType,
-    glob: boolean
+    glob: boolean,
   ): SourceErrorEvent {
     const event = this.getBaseMetricsEvent(
       "error",
+      ErrorEventAction.SourceError,
       commonFields,
-      commonUserFields
+      commonUserFields,
     ) as SourceErrorEvent;
     event.action = ErrorEventAction.SourceError;
     event.space = space;
@@ -74,18 +77,21 @@ export class ErrorEventFactory extends MetricsEventFactory {
     screen_name: MetricsEventScreenName,
     api: string,
     status: string,
-    message: string
+    message: string,
+    pageUrl: string,
   ) {
     const event = this.getBaseMetricsEvent(
       "error",
+      ErrorEventAction.ErrorBoundary,
       commonFields,
-      commonUserFields
+      commonUserFields,
     ) as HTTPErrorEvent;
     event.action = ErrorEventAction.ErrorBoundary;
     event.screen_name = screen_name;
     event.api = api;
     event.status = status;
     event.message = message;
+    event.page_url = pageUrl;
     return event;
   }
 
@@ -94,17 +100,20 @@ export class ErrorEventFactory extends MetricsEventFactory {
     commonUserFields: CommonUserFields,
     screen_name: MetricsEventScreenName,
     stack: string,
-    message: string
+    message: string,
+    pageUrl: string,
   ) {
     const event = this.getBaseMetricsEvent(
       "error",
+      ErrorEventAction.ErrorBoundary,
       commonFields,
-      commonUserFields
+      commonUserFields,
     ) as JavascriptErrorEvent;
     event.action = ErrorEventAction.ErrorBoundary;
     event.screen_name = screen_name;
     event.stack = stack;
     event.message = message;
+    event.page_url = pageUrl;
     return event;
   }
 }

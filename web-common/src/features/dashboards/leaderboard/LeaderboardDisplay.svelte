@@ -1,66 +1,121 @@
 <script lang="ts">
-  import VirtualizedGrid from "@rilldata/web-common/components/VirtualizedGrid.svelte";
   import { getStateManagers } from "@rilldata/web-common/features/dashboards/state-managers/state-managers";
-  import { onDestroy, onMount } from "svelte";
+  import type {
+    V1Expression,
+    V1MetricsViewSpec,
+    V1TimeRange,
+  } from "@rilldata/web-common/runtime-client";
+  import { runtime } from "@rilldata/web-common/runtime-client/runtime-store";
+  import type { DimensionThresholdFilter } from "../stores/metrics-explorer-entity";
   import Leaderboard from "./Leaderboard.svelte";
   import LeaderboardControls from "./LeaderboardControls.svelte";
+  import {
+    DEFAULT_COL_WIDTH,
+    deltaColumn,
+    valueColumn,
+  } from "./leaderboard-widths";
 
+  export let metricsViewName: string;
+  export let whereFilter: V1Expression;
+  export let dimensionThresholdFilters: DimensionThresholdFilter[];
+  export let timeRange: V1TimeRange;
+  export let comparisonTimeRange: V1TimeRange | undefined;
+  export let timeControlsReady: boolean;
+  export let activeMeasureName: string;
+  export let metricsView: V1MetricsViewSpec;
+
+  const StateManagers = getStateManagers();
   const {
     selectors: {
+      activeMeasure: { isValidPercentOfTotal, isSummableMeasure },
+      numberFormat: { activeMeasureFormatter },
+      dimensionFilters: {
+        selectedDimensionValues,
+        atLeastOneSelection,
+        isFilterExcludeMode,
+      },
       dimensions: { visibleDimensions },
+      comparison: { isBeingCompared: isBeingComparedReadable },
+      sorting: { sortedAscending, sortType },
     },
-    metricsViewName,
-  } = getStateManagers();
+    actions: {
+      dimensions: { setPrimaryDimension },
+      sorting: { toggleSort },
+      dimensionsFilter: { toggleDimensionValueSelection },
+      comparison: { toggleComparisonDimension },
+    },
+    exploreName,
+  } = StateManagers;
 
-  /** Functionality for resizing the virtual leaderboard */
-  let columns = 3;
-  let availableWidth = 0;
-  let leaderboardContainer: HTMLElement;
-  let observer: ResizeObserver;
+  let parentElement: HTMLDivElement;
 
-  function onResize() {
-    if (!leaderboardContainer) return;
-    availableWidth = leaderboardContainer.offsetWidth;
-    columns = Math.max(1, Math.floor(availableWidth / (315 + 20)));
+  $: ({ instanceId } = $runtime);
+
+  // Reset column widths when the measure changes
+  $: if (activeMeasureName) {
+    valueColumn.reset();
+    deltaColumn.reset();
   }
 
-  onMount(() => {
-    onResize();
-    const observer = new ResizeObserver(() => {
-      onResize();
-    });
-    observer.observe(leaderboardContainer);
-  });
+  $: firstColumnWidth =
+    !comparisonTimeRange && !$isValidPercentOfTotal ? 240 : 164;
 
-  onDestroy(() => {
-    observer?.disconnect();
-  });
+  $: tableWidth =
+    firstColumnWidth +
+    $valueColumn +
+    (comparisonTimeRange
+      ? $deltaColumn + DEFAULT_COL_WIDTH
+      : $isValidPercentOfTotal
+        ? DEFAULT_COL_WIDTH
+        : 0);
 </script>
 
-<svelte:window on:resize={onResize} />
-<!-- container for the metrics leaderboard components and controls -->
-<div
-  bind:this={leaderboardContainer}
-  class="flex flex-col overflow-hidden"
-  style:height="calc(100vh - 130px - 4rem)"
-  style:min-width="365px"
->
-  <div
-    class="grid grid-auto-cols justify-between grid-flow-col items-center pl-1 pb-3 flex-grow-0"
-  >
-    <LeaderboardControls metricViewName={$metricsViewName} />
+<div class="flex flex-col overflow-hidden size-full">
+  <div class="pl-2.5 pb-3">
+    <LeaderboardControls exploreName={$exploreName} />
   </div>
-  <div class="grow overflow-hidden">
-    {#if $visibleDimensions.length > 0}
-      <VirtualizedGrid
-        {columns}
-        height="100%"
-        items={$visibleDimensions}
-        let:item
-      >
-        <!-- the single virtual element -->
-        <Leaderboard dimensionName={item.name} />
-      </VirtualizedGrid>
+  <div bind:this={parentElement} class="overflow-y-auto leaderboard-display">
+    {#if parentElement}
+      <div class="leaderboard-grid overflow-hidden pb-4">
+        {#each $visibleDimensions as dimension (dimension.name)}
+          {#if dimension.name}
+            <Leaderboard
+              isValidPercentOfTotal={$isValidPercentOfTotal}
+              {metricsViewName}
+              {activeMeasureName}
+              {whereFilter}
+              {dimensionThresholdFilters}
+              {instanceId}
+              {tableWidth}
+              {timeRange}
+              {firstColumnWidth}
+              sortedAscending={$sortedAscending}
+              sortType={$sortType}
+              filterExcludeMode={$isFilterExcludeMode(dimension.name)}
+              atLeastOneActive={$atLeastOneSelection(dimension.name)}
+              {comparisonTimeRange}
+              {dimension}
+              isSummableMeasure={$isSummableMeasure}
+              {parentElement}
+              {metricsView}
+              {timeControlsReady}
+              selectedValues={$selectedDimensionValues(dimension.name)}
+              isBeingCompared={$isBeingComparedReadable(dimension.name)}
+              formatter={$activeMeasureFormatter}
+              {setPrimaryDimension}
+              {toggleSort}
+              {toggleDimensionValueSelection}
+              {toggleComparisonDimension}
+            />
+          {/if}
+        {/each}
+      </div>
     {/if}
   </div>
 </div>
+
+<style lang="postcss">
+  .leaderboard-grid {
+    @apply flex flex-row flex-wrap gap-4;
+  }
+</style>

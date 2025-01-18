@@ -1,130 +1,129 @@
-import { getQuerySortType } from "@rilldata/web-common/features/dashboards/leaderboard/leaderboard-utils";
+import { getComparisonRequestMeasures } from "@rilldata/web-common/features/dashboards/dashboard-utils";
+import { getDimensionFilterWithSearch } from "@rilldata/web-common/features/dashboards/dimension-table/dimension-table-utils";
+import {
+  ComparisonDeltaAbsoluteSuffix,
+  ComparisonDeltaRelativeSuffix,
+} from "@rilldata/web-common/features/dashboards/filters/measure-filters/measure-filter-entry";
+import { mergeMeasureFilters } from "@rilldata/web-common/features/dashboards/filters/measure-filters/measure-filter-utils";
 import { SortDirection } from "@rilldata/web-common/features/dashboards/proto-state/derived-types";
-import { useMetaQuery } from "@rilldata/web-common/features/dashboards/selectors/index";
 import type { StateManagers } from "@rilldata/web-common/features/dashboards/state-managers/state-managers";
+import { sanitiseExpression } from "@rilldata/web-common/features/dashboards/stores/filter-utils";
 import type { MetricsExplorerEntity } from "@rilldata/web-common/features/dashboards/stores/metrics-explorer-entity";
 import { useTimeControlStore } from "@rilldata/web-common/features/dashboards/time-controls/time-control-store";
-import type { TimeControlState } from "@rilldata/web-common/features/dashboards/time-controls/time-control-store";
 import {
-  TimeComparisonOption,
-  TimeRangePreset,
-} from "@rilldata/web-common/lib/time/types";
+  mapComparisonTimeRange,
+  mapTimeRange,
+} from "@rilldata/web-common/features/dashboards/time-controls/time-range-mappers";
+import { DashboardState_LeaderboardSortType } from "@rilldata/web-common/proto/gen/rill/ui/v1/dashboard_pb";
 import type {
-  V1MetricsViewComparisonRequest,
-  V1MetricsViewSpec,
+  V1MetricsViewAggregationMeasure,
+  V1MetricsViewAggregationRequest,
   V1TimeRange,
 } from "@rilldata/web-common/runtime-client";
 import { runtime } from "@rilldata/web-common/runtime-client/runtime-store";
-import { derived, get, Readable } from "svelte/store";
+import { derived, get, type Readable } from "svelte/store";
 
 export function getDimensionTableExportArgs(
-  ctx: StateManagers
-): Readable<V1MetricsViewComparisonRequest | undefined> {
+  ctx: StateManagers,
+): Readable<V1MetricsViewAggregationRequest | undefined> {
   return derived(
     [
       ctx.metricsViewName,
       ctx.dashboardStore,
       useTimeControlStore(ctx),
-      useMetaQuery(ctx),
+      ctx.validSpecStore,
     ],
-    ([metricViewName, dashboardState, timeControlState, metricsView]) => {
-      if (!metricsView.data || !timeControlState.ready) return undefined;
+    ([metricsViewName, dashboardState, timeControlState, validSpecStore]) => {
+      if (!validSpecStore.data?.explore || !timeControlState.ready)
+        return undefined;
 
-      const timeRange = getTimeRange(timeControlState, metricsView.data);
+      const timeRange = mapTimeRange(
+        timeControlState,
+        validSpecStore.data.explore,
+      );
       if (!timeRange) return undefined;
 
-      const comparisonTimeRange = getComparisonTimeRange(
+      const comparisonTimeRange = mapComparisonTimeRange(
         dashboardState,
         timeControlState,
-        timeRange
+        timeRange,
       );
 
-      return {
-        instanceId: get(runtime).instanceId,
-        metricsViewName: metricViewName,
-        dimension: {
-          name: dashboardState.selectedDimensionName,
-        },
-        measures: dashboardState.selectedMeasureNames.map((name) => ({
-          name: name,
-        })),
+      return getDimensionTableAggregationRequestForTime(
+        metricsViewName,
+        dashboardState,
         timeRange,
-        ...(comparisonTimeRange ? { comparisonTimeRange } : {}),
-        sort: [
-          {
-            name: dashboardState.leaderboardMeasureName,
-            desc: dashboardState.sortDirection === SortDirection.DESCENDING,
-            type: getQuerySortType(dashboardState.dashboardSortType),
-          },
-        ],
-        filter: dashboardState.filters,
-        offset: "0",
-      };
-    }
+        comparisonTimeRange,
+      );
+    },
   );
 }
 
-/**
- * Fills in isoDuration based on selection.
- * This is used by scheduled report by using report run time as end time.
- */
-function getTimeRange(
-  timeControlState: TimeControlState,
-  metricsView: V1MetricsViewSpec
-) {
-  if (!timeControlState.selectedTimeRange?.name) return undefined;
-
-  const timeRange: V1TimeRange = {};
-  switch (timeControlState.selectedTimeRange.name) {
-    case TimeRangePreset.DEFAULT:
-      timeRange.isoDuration = metricsView.defaultTimeRange;
-      break;
-
-    case TimeRangePreset.CUSTOM:
-      timeRange.start = timeControlState.timeStart;
-      timeRange.end = timeControlState.timeEnd;
-      break;
-
-    default:
-      timeRange.isoDuration = timeControlState.selectedTimeRange.name;
-      break;
-  }
-
-  return timeRange;
-}
-
-/**
- * Fills in isoDuration and isoOffset based on selection.
- * This is used by scheduled report by using report run time as end time.
- */
-function getComparisonTimeRange(
+export function getDimensionTableAggregationRequestForTime(
+  metricsView: string,
   dashboardState: MetricsExplorerEntity,
-  timeControlState: TimeControlState,
-  timeRange: V1TimeRange | undefined
-) {
-  if (
-    !timeRange ||
-    dashboardState.selectedComparisonDimension ||
-    !timeControlState.showComparison ||
-    !timeControlState.selectedComparisonTimeRange?.name
-  ) {
-    return undefined;
+  timeRange: V1TimeRange,
+  comparisonTimeRange: V1TimeRange | undefined,
+  searchText = "",
+): V1MetricsViewAggregationRequest {
+  const measures: V1MetricsViewAggregationMeasure[] = [
+    ...dashboardState.visibleMeasureKeys,
+  ].map((name) => ({
+    name: name,
+  }));
+
+  let apiSortName = dashboardState.leaderboardMeasureName;
+  if (!dashboardState.visibleMeasureKeys.has(apiSortName)) {
+    // if selected sort measure is not visible add it to list
+    measures.push({ name: apiSortName });
+  }
+  if (comparisonTimeRange) {
+    // insert beside the correct measure
+    measures.splice(
+      measures.findIndex((m) => m.name === apiSortName) + 1,
+      0,
+      ...getComparisonRequestMeasures(apiSortName),
+    );
+    switch (dashboardState.dashboardSortType) {
+      case DashboardState_LeaderboardSortType.DELTA_ABSOLUTE:
+        apiSortName += ComparisonDeltaAbsoluteSuffix;
+        break;
+      case DashboardState_LeaderboardSortType.DELTA_PERCENT:
+        apiSortName += ComparisonDeltaRelativeSuffix;
+        break;
+    }
   }
 
-  const comparisonTimeRange: V1TimeRange = {};
-  switch (timeControlState.selectedComparisonTimeRange.name) {
-    default:
-      comparisonTimeRange.isoOffset =
-        timeControlState.selectedComparisonTimeRange.name;
-    // eslint-disable-next-line no-fallthrough
-    case TimeComparisonOption.CONTIGUOUS:
-      comparisonTimeRange.isoDuration = timeRange.isoDuration;
-      break;
+  const where = sanitiseExpression(
+    mergeMeasureFilters(
+      dashboardState,
+      getDimensionFilterWithSearch(
+        dashboardState?.whereFilter,
+        searchText,
+        dashboardState.selectedDimensionName!,
+      ),
+    ),
+    undefined,
+  );
 
-    case TimeComparisonOption.CUSTOM:
-      comparisonTimeRange.start = timeControlState.comparisonTimeStart;
-      comparisonTimeRange.end = timeControlState.comparisonTimeEnd;
-      break;
-  }
-  return comparisonTimeRange;
+  return {
+    instanceId: get(runtime).instanceId,
+    metricsView,
+    dimensions: [
+      {
+        name: dashboardState.selectedDimensionName,
+      },
+    ],
+    measures,
+    timeRange,
+    ...(comparisonTimeRange ? { comparisonTimeRange } : {}),
+    sort: [
+      {
+        name: apiSortName,
+        desc: dashboardState.sortDirection === SortDirection.DESCENDING,
+      },
+    ],
+    where,
+    offset: "0",
+  };
 }

@@ -10,6 +10,10 @@
   /* Aria label for input */
   export let label = "Search";
   export let placeholder = "Search";
+  export let border = true;
+  export let background = true;
+  export let large = false;
+  export let disabled = false;
 
   /* Reference of input DOM element */
   let ref: HTMLInputElement;
@@ -30,16 +34,32 @@
   });
 </script>
 
-<form class="relative w-full">
-  <div class="flex absolute inset-y-0 items-center pl-2 ui-copy-icon">
-    <Search />
-  </div>
+<form
+  class="relative w-full {disabled
+    ? 'pointer-events-none opacity-50 cursor-not-allowed'
+    : ''}"
+>
+  <button
+    type="button"
+    class="flex absolute inset-y-0 items-center pl-2 ui-copy-icon"
+    on:click={() => {
+      ref?.focus();
+    }}
+  >
+    <Search size={large ? "18px" : "16px"} />
+  </button>
   <input
     bind:this={ref}
     type="text"
     autocomplete="off"
     class:focus={showBorderOnFocus}
-    class="bg-slate-50 border border-gray-200 outline-none rounded-sm block w-full pl-8 p-1"
+    class:bg-slate-50={background}
+    class:border
+    class:border-gray-200={border}
+    class="outline-none rounded-sm block w-full pl-8 p-1 {large
+      ? 'h-full'
+      : ''}"
+    {disabled}
     {placeholder}
     bind:value
     on:input
@@ -50,6 +70,6 @@
 
 <style lang="postcss">
   .focus:focus {
-    @apply border-blue-400;
+    @apply border-primary-400;
   }
 </style>

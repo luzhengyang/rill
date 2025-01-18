@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/go-git/go-git/v5/plumbing/transport"
@@ -26,10 +25,7 @@ func (s *Server) GetRepoMeta(ctx context.Context, req *adminv1.GetRepoMetaReques
 
 	proj, err := s.admin.DB.FindProject(ctx, req.ProjectId)
 	if err != nil {
-		if errors.Is(err, database.ErrNotFound) {
-			return nil, status.Error(codes.NotFound, "project not found")
-		}
-		return nil, status.Error(codes.InvalidArgument, err.Error())
+		return nil, err
 	}
 
 	permissions := auth.GetClaims(ctx).ProjectPermissions(ctx, proj.OrganizationID, proj.ID)
@@ -39,6 +35,21 @@ func (s *Server) GetRepoMeta(ctx context.Context, req *adminv1.GetRepoMetaReques
 
 	if proj.ProdBranch != req.Branch {
 		return nil, status.Error(codes.InvalidArgument, "branch not found")
+	}
+
+	if proj.ArchiveAssetID != nil {
+		asset, err := s.admin.DB.FindAsset(ctx, *proj.ArchiveAssetID)
+		if err != nil {
+			return nil, err
+		}
+
+		downloadURL, err := s.generateSignedDownloadURL(asset)
+		if err != nil {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+		return &adminv1.GetRepoMetaResponse{
+			ArchiveDownloadUrl: downloadURL,
+		}, nil
 	}
 
 	if proj.GithubURL == nil || proj.GithubInstallationID == nil {
@@ -75,10 +86,7 @@ func (s *Server) PullVirtualRepo(ctx context.Context, req *adminv1.PullVirtualRe
 
 	proj, err := s.admin.DB.FindProject(ctx, req.ProjectId)
 	if err != nil {
-		if errors.Is(err, database.ErrNotFound) {
-			return nil, status.Error(codes.NotFound, "project not found")
-		}
-		return nil, status.Error(codes.InvalidArgument, err.Error())
+		return nil, err
 	}
 
 	if proj.ProdBranch != req.Branch {

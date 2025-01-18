@@ -11,7 +11,8 @@ import (
 	"github.com/rilldata/rill/runtime"
 	compilerv1 "github.com/rilldata/rill/runtime/compilers/rillv1"
 	"github.com/rilldata/rill/runtime/drivers"
-	"golang.org/x/exp/slog"
+	"github.com/rilldata/rill/runtime/pkg/arrayutil"
+	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -87,7 +88,7 @@ func (r *ProjectParserReconciler) Reconcile(ctx context.Context, n *runtimev1.Re
 		r.C.Lock(ctx)
 		defer r.C.Unlock(ctx)
 
-		resources, err := r.C.List(ctx, "", false)
+		resources, err := r.C.List(ctx, "", "", false)
 		if err != nil {
 			return runtime.ReconcileResult{Err: err}
 		}
@@ -119,7 +120,7 @@ func (r *ProjectParserReconciler) Reconcile(ctx context.Context, n *runtimev1.Re
 	hash, err := repo.CommitHash(ctx)
 	if err != nil {
 		// Not worth failing the reconcile for this. On error, it'll just set CurrentCommitSha to "".
-		r.C.Logger.Error("failed to get commit hash", slog.String("err", err.Error()))
+		r.C.Logger.Error("failed to get commit hash", zap.String("error", err.Error()))
 	}
 	if pp.State.CurrentCommitSha != hash {
 		pp.State.CurrentCommitSha = hash
@@ -135,16 +136,9 @@ func (r *ProjectParserReconciler) Reconcile(ctx context.Context, n *runtimev1.Re
 		return runtime.ReconcileResult{Err: fmt.Errorf("failed to find instance: %w", err)}
 	}
 
-	// Find DuckDB connectors
-	var duckdbConnectors []string
-	for _, connector := range inst.Connectors {
-		if connector.Type == "duckdb" {
-			duckdbConnectors = append(duckdbConnectors, connector.Name)
-		}
-	}
-
 	// Parse the project
-	parser, err := compilerv1.Parse(ctx, repo, r.C.InstanceID, inst.OLAPConnector, duckdbConnectors)
+	// NOTE: Explicitly passing inst.OLAPConnector instead of inst.ResolveOLAPConnector() since the parser expects the base name to use if not overridden in rill.yaml.
+	parser, err := compilerv1.Parse(ctx, repo, r.C.InstanceID, inst.Environment, inst.OLAPConnector)
 	if err != nil {
 		return runtime.ReconcileResult{Err: fmt.Errorf("failed to parse: %w", err)}
 	}
@@ -168,7 +162,7 @@ func (r *ProjectParserReconciler) Reconcile(ctx context.Context, n *runtimev1.Re
 	defer func() {
 		pp.State.Watching = false
 		if err = r.C.UpdateState(ctx, n, self); err != nil {
-			r.C.Logger.Error("failed to update watch state", slog.Any("error", err))
+			r.C.Logger.Error("failed to update watch state", zap.Any("error", err))
 		}
 	}()
 
@@ -180,14 +174,37 @@ func (r *ProjectParserReconciler) Reconcile(ctx context.Context, n *runtimev1.Re
 	err = repo.Watch(ctx, func(events []drivers.WatchEvent) {
 		// Get changed paths that are not directories
 		changedPaths := make([]string, 0, len(events))
+		hasDuplicates := false
 		for _, e := range events {
 			if e.Dir {
 				continue
 			}
-			if strings.HasSuffix(e.Path, ".db") || strings.HasSuffix(e.Path, ".wal") {
+			if parser.IsSkippable(e.Path) {
+				// We do not get events for files in deleted/renamed directories.
+				// So we need to manually find paths we're tracking in the directory and add them to changedPaths.
+				//
+				// Note that e.Dir is always false for deletes, so we don't actually know if the path was a directory.
+				// Calling TrackedPathsInDir is safe even if the given path isn't a directory.
+				//
+				// NOTE: This is nested under IsSkippable as an optimization because IsSkippable is true for directories.
+				// This is pretty hacky and should be refactored (probably more fundamentally in the watcher itself).
+				if e.Type == runtimev1.FileEvent_FILE_EVENT_DELETE {
+					ps := parser.TrackedPathsInDir(e.Path)
+					if len(ps) > 0 {
+						changedPaths = append(changedPaths, ps...)
+						hasDuplicates = true
+					}
+					continue
+				}
+
 				continue
 			}
 			changedPaths = append(changedPaths, e.Path)
+		}
+
+		// Small optimization to avoid deduplicating if we know we didn't append to it.
+		if hasDuplicates {
+			changedPaths = arrayutil.Dedupe(changedPaths)
 		}
 
 		if len(changedPaths) == 0 {
@@ -201,8 +218,10 @@ func (r *ProjectParserReconciler) Reconcile(ctx context.Context, n *runtimev1.Re
 			err = r.reconcileParser(ctx, inst, self, parser, diff, changedPaths)
 		}
 		if err != nil && !errors.Is(err, ErrParserHasParseErrors) {
-			reparseErr = err
-			cancel()
+			if reparseErr == nil { // In case a callback is somehow invoked after cancel() is called in a previous callback
+				reparseErr = err
+				cancel()
+			}
 			return
 		}
 	})
@@ -218,7 +237,7 @@ func (r *ProjectParserReconciler) Reconcile(ctx context.Context, n *runtimev1.Re
 
 	// If the watch failed, we return without rescheduling.
 	// TODO: Should we have some kind of retry?
-	r.C.Logger.Error("Stopped watching for file changes", slog.String("err", err.Error()))
+	r.C.Logger.Error("Stopped watching for file changes", zap.String("error", err.Error()))
 	return runtime.ReconcileResult{Err: err}
 }
 
@@ -244,14 +263,14 @@ func (r *ProjectParserReconciler) reconcileParser(ctx context.Context, inst *dri
 			if skipRillYAMLErr && e.FilePath == "/rill.yaml" {
 				continue
 			}
-			r.C.Logger.Warn("Parser error", slog.String("path", e.FilePath), slog.String("err", e.Message))
+			r.C.Logger.Warn("Parser error", zap.String("path", e.FilePath), zap.String("error", e.Message))
 		}
 	} else if diff.Skipped {
-		r.C.Logger.Warn("Not parsing changed paths due to broken rill.yaml")
+		r.C.Logger.Warn("Not parsing changed paths due to missing or broken rill.yaml")
 	} else {
 		for _, e := range parser.Errors {
 			if slices.Contains(changedPaths, e.FilePath) {
-				r.C.Logger.Warn("Parser error", slog.String("path", e.FilePath), slog.String("err", e.Message))
+				r.C.Logger.Warn("Parser error", zap.String("path", e.FilePath), zap.String("error", e.Message))
 			}
 		}
 	}
@@ -271,16 +290,16 @@ func (r *ProjectParserReconciler) reconcileParser(ctx context.Context, inst *dri
 		return parseErrsErr
 	}
 
-	// Treat reloads the same as a fresh parse (where there's no diff)
-	if diff != nil && diff.Reloaded {
-		diff = nil
-	}
-
-	// Update state from rill.yaml and .env
-	if diff == nil || diff.ModifiedDotEnv {
-		err := r.reconcileProjectConfig(ctx, parser)
+	// not setting restartController=true when diff is actually nil prevents infinite restarts
+	updateConfig := diff == nil || diff.ModifiedDotEnv || diff.Reloaded
+	if updateConfig {
+		restartController := diff != nil
+		err := r.reconcileProjectConfig(ctx, parser, restartController)
 		if err != nil {
 			return err
+		}
+		if restartController {
+			return nil
 		}
 	}
 
@@ -305,44 +324,8 @@ func (r *ProjectParserReconciler) reconcileParser(ctx context.Context, inst *dri
 }
 
 // reconcileProjectConfig updates instance config derived from rill.yaml and .env
-func (r *ProjectParserReconciler) reconcileProjectConfig(ctx context.Context, parser *compilerv1.Parser) error {
-	inst, err := r.C.Runtime.Instance(ctx, r.C.InstanceID)
-	if err != nil {
-		return err
-	}
-
-	// Shallow clone for editing
-	tmp := *inst
-	inst = &tmp
-
-	conns := make([]*runtimev1.Connector, 0, len(parser.RillYAML.Connectors))
-	for _, c := range parser.RillYAML.Connectors {
-		conns = append(conns, &runtimev1.Connector{
-			Type:   c.Type,
-			Name:   c.Name,
-			Config: c.Defaults,
-		})
-	}
-	inst.ProjectConnectors = conns
-
-	vars := make(map[string]string)
-	for _, v := range parser.RillYAML.Variables {
-		vars[v.Name] = v.Default
-	}
-	for k, v := range parser.DotEnv {
-		vars[k] = v
-	}
-	inst.ProjectVariables = vars
-
-	// TODO: Passing "false" guards against infinite cancellations and restarts of the controller,
-	// but it also ignores potential consistency issues where we update connector config without evicting cached connctions,
-	// or where we update variables and don't re-evaluate all resources.
-	err = r.C.Runtime.EditInstance(ctx, inst, false)
-	if err != nil {
-		return err
-	}
-
-	return nil
+func (r *ProjectParserReconciler) reconcileProjectConfig(ctx context.Context, parser *compilerv1.Parser, restartController bool) error {
+	return r.C.Runtime.UpdateInstanceWithRillYAML(ctx, r.C.InstanceID, parser, restartController)
 }
 
 // reconcileResources creates, updates and deletes resources as necessary to match the parser's output with the current resources in the catalog.
@@ -351,7 +334,7 @@ func (r *ProjectParserReconciler) reconcileResources(ctx context.Context, inst *
 	var deleteResources []*runtimev1.Resource
 
 	// Pass over all existing resources in the catalog.
-	resources, err := r.C.List(ctx, "", false)
+	resources, err := r.C.List(ctx, "", "", false)
 	if err != nil {
 		return err
 	}
@@ -363,7 +346,7 @@ func (r *ProjectParserReconciler) reconcileResources(ctx context.Context, inst *
 			continue
 		}
 
-		n := resourceNameToCompiler(rr.Meta.Name).Normalized()
+		n := runtime.ResourceNameToCompiler(rr.Meta.Name).Normalized()
 		def, ok := parser.Resources[n]
 
 		// If the existing resource is in the parser output, update it.
@@ -433,18 +416,14 @@ func (r *ProjectParserReconciler) reconcileResources(ctx context.Context, inst *
 // reconcileResourcesDiff is similar to reconcileResources, but uses a diff from parser.Reparse instead of doing a full comparison of all resources.
 func (r *ProjectParserReconciler) reconcileResourcesDiff(ctx context.Context, inst *drivers.Instance, self *runtimev1.Resource, parser *compilerv1.Parser, diff *compilerv1.Diff) error {
 	// Gather resource to delete so we can check for renames.
-	deleteResources := make([]*runtimev1.Resource, 0, len(diff.Deleted))
+	deleteResources := make([]*runtimev1.ResourceName, 0, len(diff.Deleted))
 	for _, n := range diff.Deleted {
-		r, err := r.C.Get(ctx, resourceNameFromCompiler(n), false)
-		if err != nil {
-			return err
-		}
-		deleteResources = append(deleteResources, r)
+		deleteResources = append(deleteResources, runtime.ResourceNameFromCompiler(n))
 	}
 
 	// Updates
 	for _, n := range diff.Modified {
-		existing, err := r.C.Get(ctx, resourceNameFromCompiler(n), false)
+		existing, err := r.C.Get(ctx, runtime.ResourceNameFromCompiler(n), false)
 		if err != nil {
 			return err
 		}
@@ -461,8 +440,17 @@ func (r *ProjectParserReconciler) reconcileResourcesDiff(ctx context.Context, in
 
 		// Rename if possible
 		renamed := false
-		for idx, rr := range deleteResources {
-			var err error
+		for idx, rn := range deleteResources {
+			if rn == nil {
+				// Already renamed
+				continue
+			}
+
+			rr, err := r.C.Get(ctx, rn, false)
+			if err != nil {
+				return err
+			}
+
 			renamed, err = r.attemptRename(ctx, inst, self, def, rr)
 			if err != nil {
 				return err
@@ -484,13 +472,13 @@ func (r *ProjectParserReconciler) reconcileResourcesDiff(ctx context.Context, in
 	}
 
 	// Deletes
-	for _, rr := range deleteResources {
+	for _, rn := range deleteResources {
 		// The ones that got renamed were set to nil
-		if rr == nil {
+		if rn == nil {
 			continue
 		}
 
-		err := r.C.Delete(ctx, rr.Meta.Name)
+		err := r.C.Delete(ctx, rn)
 		if err != nil {
 			return err
 		}
@@ -504,7 +492,10 @@ func (r *ProjectParserReconciler) reconcileResourcesDiff(ctx context.Context, in
 // If existing is not nil, it compares values and only updates meta/spec values if they have changed (ensuring stable resource version numbers).
 func (r *ProjectParserReconciler) putParserResourceDef(ctx context.Context, inst *drivers.Instance, self *runtimev1.Resource, def *compilerv1.Resource, existing *runtimev1.Resource) error {
 	// Apply defaults
-	def = applySpecDefaults(inst, def)
+	def, err := applySpecDefaults(inst, def)
+	if err != nil {
+		return err
+	}
 
 	// Make resource spec to insert/update.
 	// res should be nil if no spec changes are needed.
@@ -522,6 +513,10 @@ func (r *ProjectParserReconciler) putParserResourceDef(ctx context.Context, inst
 		if existing == nil || !equalMetricsViewSpec(existing.GetMetricsView().Spec, def.MetricsViewSpec) {
 			res = &runtimev1.Resource{Resource: &runtimev1.Resource_MetricsView{MetricsView: &runtimev1.MetricsViewV2{Spec: def.MetricsViewSpec}}}
 		}
+	case compilerv1.ResourceKindExplore:
+		if existing == nil || !equalExploreSpec(existing.GetExplore().Spec, def.ExploreSpec) {
+			res = &runtimev1.Resource{Resource: &runtimev1.Resource_Explore{Explore: &runtimev1.Explore{Spec: def.ExploreSpec}}}
+		}
 	case compilerv1.ResourceKindMigration:
 		if existing == nil || !equalMigrationSpec(existing.GetMigration().Spec, def.MigrationSpec) {
 			res = &runtimev1.Resource{Resource: &runtimev1.Resource_Migration{Migration: &runtimev1.Migration{Spec: def.MigrationSpec}}}
@@ -530,36 +525,64 @@ func (r *ProjectParserReconciler) putParserResourceDef(ctx context.Context, inst
 		if existing == nil || !equalReportSpec(existing.GetReport().Spec, def.ReportSpec) {
 			res = &runtimev1.Resource{Resource: &runtimev1.Resource_Report{Report: &runtimev1.Report{Spec: def.ReportSpec}}}
 		}
+	case compilerv1.ResourceKindAlert:
+		if existing == nil || !equalAlertSpec(existing.GetAlert().Spec, def.AlertSpec) {
+			res = &runtimev1.Resource{Resource: &runtimev1.Resource_Alert{Alert: &runtimev1.Alert{Spec: def.AlertSpec}}}
+		}
 	case compilerv1.ResourceKindTheme:
 		if existing == nil || !equalThemeSpec(existing.GetTheme().Spec, def.ThemeSpec) {
 			res = &runtimev1.Resource{Resource: &runtimev1.Resource_Theme{Theme: &runtimev1.Theme{Spec: def.ThemeSpec}}}
 		}
+	case compilerv1.ResourceKindComponent:
+		if existing == nil || !equalComponentSpec(existing.GetComponent().Spec, def.ComponentSpec) {
+			res = &runtimev1.Resource{Resource: &runtimev1.Resource_Component{Component: &runtimev1.Component{Spec: def.ComponentSpec}}}
+		}
+	case compilerv1.ResourceKindCanvas:
+		if existing == nil || !equalCanvasSpec(existing.GetCanvas().Spec, def.CanvasSpec) {
+			res = &runtimev1.Resource{Resource: &runtimev1.Resource_Canvas{Canvas: &runtimev1.Canvas{Spec: def.CanvasSpec}}}
+		}
+	case compilerv1.ResourceKindAPI:
+		if existing == nil || !equalAPISpec(existing.GetApi().Spec, def.APISpec) {
+			res = &runtimev1.Resource{Resource: &runtimev1.Resource_Api{Api: &runtimev1.API{Spec: def.APISpec}}}
+		}
+	case compilerv1.ResourceKindConnector:
+		if existing == nil || !equalConnectorSpec(existing.GetConnector().Spec, def.ConnectorSpec) {
+			res = &runtimev1.Resource{Resource: &runtimev1.Resource_Connector{Connector: &runtimev1.ConnectorV2{Spec: def.ConnectorSpec}}}
+		}
 	default:
-		panic(fmt.Errorf("unknown resource kind %q", def.Name.Kind))
+		panic(fmt.Errorf("unknown resource type %q", def.Name.Kind))
 	}
 
 	// Make refs for the resource meta
 	refs := make([]*runtimev1.ResourceName, 0, len(def.Refs))
 	for _, r := range def.Refs {
-		refs = append(refs, resourceNameFromCompiler(r))
+		refs = append(refs, runtime.ResourceNameFromCompiler(r))
 	}
 
 	// Create and return if not updating
-	n := resourceNameFromCompiler(def.Name)
+	n := runtime.ResourceNameFromCompiler(def.Name)
 	if existing == nil {
 		return r.C.Create(ctx, n, refs, self.Meta.Name, def.Paths, false, res)
 	}
 
-	// The name may have changed to a different case (e.g. aAa -> Aaa)
+	// Handle changed name and/or path
 	if n.Kind == existing.Meta.Name.Kind && n.Name != existing.Meta.Name.Name {
+		// The name may have changed to a different case (e.g. aAa -> Aaa).
+		// Note that this also updates the paths (updating them separately with UpdateMeta would be considered a mutation of a renamed resource, which requires falling back to a less optimal reconciliation).
 		err := r.C.UpdateName(ctx, existing.Meta.Name, n, self.Meta.Name, def.Paths)
+		if err != nil {
+			return err
+		}
+	} else if !slices.Equal(existing.Meta.FilePaths, def.Paths) {
+		// The path may have been changed. Usually this case is covered in the UpdateName case above because changing a file path usually changes the name.
+		err := r.C.UpdateMeta(ctx, n, existing.Meta.Refs, self.Meta.Name, def.Paths)
 		if err != nil {
 			return err
 		}
 	}
 
-	// Update meta if refs or file paths changed
-	if !slices.Equal(existing.Meta.FilePaths, def.Paths) || !equalResourceNames(existing.Meta.Refs, refs) {
+	// Update meta if refs changed
+	if !equalResourceNames(existing.Meta.Refs, refs) {
 		err := r.C.UpdateMeta(ctx, n, refs, self.Meta.Name, def.Paths)
 		if err != nil {
 			return err
@@ -585,7 +608,7 @@ func (r *ProjectParserReconciler) putParserResourceDef(ctx context.Context, inst
 // It returns false if no rename was done.
 // In addition to renaming, it also updates the resource's meta to match the parser resource definition.
 func (r *ProjectParserReconciler) attemptRename(ctx context.Context, inst *drivers.Instance, self *runtimev1.Resource, def *compilerv1.Resource, existing *runtimev1.Resource) (bool, error) {
-	newName := resourceNameFromCompiler(def.Name)
+	newName := runtime.ResourceNameFromCompiler(def.Name)
 	if existing.Meta.Name.Kind != newName.Kind {
 		return false, nil
 	}
@@ -595,13 +618,16 @@ func (r *ProjectParserReconciler) attemptRename(ctx context.Context, inst *drive
 		return false, nil
 	}
 	for i, n := range existing.Meta.Refs {
-		if resourceNameToCompiler(n) != def.Refs[i] {
+		if runtime.ResourceNameToCompiler(n) != def.Refs[i] {
 			return false, nil
 		}
 	}
 
 	// Apply defaults before comparing specs
-	def = applySpecDefaults(inst, def)
+	def, err := applySpecDefaults(inst, def)
+	if err != nil {
+		return false, err
+	}
 
 	// Check spec is the same
 	switch def.Name.Kind {
@@ -630,7 +656,7 @@ func (r *ProjectParserReconciler) attemptRename(ctx context.Context, inst *drive
 	// NOTE: Not comparing owner and paths since changing those are allowed when renaming.
 
 	// Run rename
-	err := r.C.UpdateName(ctx, existing.Meta.Name, newName, self.Meta.Name, def.Paths)
+	err = r.C.UpdateName(ctx, existing.Meta.Name, newName, self.Meta.Name, def.Paths)
 	if err != nil {
 		return false, err
 	}
@@ -639,58 +665,20 @@ func (r *ProjectParserReconciler) attemptRename(ctx context.Context, inst *drive
 }
 
 // applySpecDefaults applies instance-level default properties to a resource spec.
-func applySpecDefaults(inst *drivers.Instance, def *compilerv1.Resource) *compilerv1.Resource {
+func applySpecDefaults(inst *drivers.Instance, def *compilerv1.Resource) (*compilerv1.Resource, error) {
+	cfg, err := inst.Config()
+	if err != nil {
+		return nil, err
+	}
+
 	switch def.Name.Kind {
 	case compilerv1.ResourceKindSource:
-		def.SourceSpec.StageChanges = inst.StageChanges
-	case compilerv1.ResourceKindModel:
-		def.ModelSpec.StageChanges = inst.StageChanges
-		if def.ModelSpec.Materialize == nil {
-			def.ModelSpec.Materialize = &inst.ModelDefaultMaterialize
-		}
-		def.ModelSpec.MaterializeDelaySeconds = inst.ModelMaterializeDelaySeconds
+		def.SourceSpec.StageChanges = cfg.StageChanges
 	default:
 		// Nothing to do
 	}
-	return def
-}
 
-func resourceNameFromCompiler(name compilerv1.ResourceName) *runtimev1.ResourceName {
-	switch name.Kind {
-	case compilerv1.ResourceKindSource:
-		return &runtimev1.ResourceName{Kind: runtime.ResourceKindSource, Name: name.Name}
-	case compilerv1.ResourceKindModel:
-		return &runtimev1.ResourceName{Kind: runtime.ResourceKindModel, Name: name.Name}
-	case compilerv1.ResourceKindMetricsView:
-		return &runtimev1.ResourceName{Kind: runtime.ResourceKindMetricsView, Name: name.Name}
-	case compilerv1.ResourceKindMigration:
-		return &runtimev1.ResourceName{Kind: runtime.ResourceKindMigration, Name: name.Name}
-	case compilerv1.ResourceKindReport:
-		return &runtimev1.ResourceName{Kind: runtime.ResourceKindReport, Name: name.Name}
-	case compilerv1.ResourceKindTheme:
-		return &runtimev1.ResourceName{Kind: runtime.ResourceKindTheme, Name: name.Name}
-	default:
-		panic(fmt.Errorf("unknown resource kind %q", name.Kind))
-	}
-}
-
-func resourceNameToCompiler(name *runtimev1.ResourceName) compilerv1.ResourceName {
-	switch name.Kind {
-	case runtime.ResourceKindSource:
-		return compilerv1.ResourceName{Kind: compilerv1.ResourceKindSource, Name: name.Name}
-	case runtime.ResourceKindModel:
-		return compilerv1.ResourceName{Kind: compilerv1.ResourceKindModel, Name: name.Name}
-	case runtime.ResourceKindMetricsView:
-		return compilerv1.ResourceName{Kind: compilerv1.ResourceKindMetricsView, Name: name.Name}
-	case runtime.ResourceKindMigration:
-		return compilerv1.ResourceName{Kind: compilerv1.ResourceKindMigration, Name: name.Name}
-	case runtime.ResourceKindReport:
-		return compilerv1.ResourceName{Kind: compilerv1.ResourceKindReport, Name: name.Name}
-	case runtime.ResourceKindTheme:
-		return compilerv1.ResourceName{Kind: compilerv1.ResourceKindTheme, Name: name.Name}
-	default:
-		panic(fmt.Errorf("unknown resource kind %q", name.Kind))
-	}
+	return def, nil
 }
 
 func equalResourceName(a, b *runtimev1.ResourceName) bool {
@@ -721,6 +709,10 @@ func equalMetricsViewSpec(a, b *runtimev1.MetricsViewSpec) bool {
 	return proto.Equal(a, b)
 }
 
+func equalExploreSpec(a, b *runtimev1.ExploreSpec) bool {
+	return proto.Equal(a, b)
+}
+
 func equalMigrationSpec(a, b *runtimev1.MigrationSpec) bool {
 	return proto.Equal(a, b)
 }
@@ -729,6 +721,26 @@ func equalReportSpec(a, b *runtimev1.ReportSpec) bool {
 	return proto.Equal(a, b)
 }
 
+func equalAlertSpec(a, b *runtimev1.AlertSpec) bool {
+	return proto.Equal(a, b)
+}
+
 func equalThemeSpec(a, b *runtimev1.ThemeSpec) bool {
+	return proto.Equal(a, b)
+}
+
+func equalComponentSpec(a, b *runtimev1.ComponentSpec) bool {
+	return proto.Equal(a, b)
+}
+
+func equalCanvasSpec(a, b *runtimev1.CanvasSpec) bool {
+	return proto.Equal(a, b)
+}
+
+func equalAPISpec(a, b *runtimev1.APISpec) bool {
+	return proto.Equal(a, b)
+}
+
+func equalConnectorSpec(a, b *runtimev1.ConnectorSpec) bool {
 	return proto.Equal(a, b)
 }

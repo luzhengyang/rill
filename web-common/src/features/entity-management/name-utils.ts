@@ -1,3 +1,10 @@
+export const VALID_NAME_PATTERN = /^[^<>:"/\\|?*]+$/;
+
+export const INVALID_CHARS = /[^a-zA-Z_\d]/g;
+
+export const INVALID_NAME_MESSAGE =
+  'Filename cannot contain special characters like /, <, >, :, ", \\, |, ?, or *. Please choose a different name.';
+
 // sourced from https://www.steveruiz.me/posts/incrementing-name
 
 // Will return "1" from "table_name_1"
@@ -24,23 +31,15 @@ export function getName(name: string, others: string[]): string {
   return result;
 }
 
-export function getNextEntityName(
-  entityNames: Array<string>,
-  entityName: string
-): string {
-  const idx = entityNames.indexOf(entityName);
-  if (idx <= 0) {
-    return entityNames[idx + 1];
-  } else {
-    return entityNames[idx - 1];
-  }
-}
-
 export function isDuplicateName(
   name: string,
   fromName: string,
-  names: Array<string | undefined>
+  names: Array<string>,
 ) {
   if (name.toLowerCase() === fromName.toLowerCase()) return false;
-  return names.findIndex((n) => n.toLowerCase() === name.toLowerCase()) >= 0;
+  return names.findIndex((n) => n?.toLowerCase() === name.toLowerCase()) >= 0;
+}
+
+export function sanitizeEntityName(entityName: string): string {
+  return entityName.replace(INVALID_CHARS, "_");
 }

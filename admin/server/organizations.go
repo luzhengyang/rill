@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
+	"strconv"
 	"strings"
 
 	"github.com/rilldata/rill/admin/database"
@@ -43,7 +45,7 @@ func (s *Server) ListOrganizations(ctx context.Context, req *adminv1.ListOrganiz
 
 	pbs := make([]*adminv1.Organization, len(orgs))
 	for i, org := range orgs {
-		pbs[i] = organizationToDTO(org)
+		pbs[i] = s.organizationToDTO(org, false)
 	}
 
 	return &adminv1.ListOrganizationsResponse{Organizations: pbs, NextPageToken: nextToken}, nil
@@ -54,47 +56,42 @@ func (s *Server) GetOrganization(ctx context.Context, req *adminv1.GetOrganizati
 
 	org, err := s.admin.DB.FindOrganizationByName(ctx, req.Name)
 	if err != nil {
-		if errors.Is(err, database.ErrNotFound) {
-			return nil, status.Error(codes.NotFound, "org not found")
-		}
-		return nil, status.Error(codes.InvalidArgument, err.Error())
+		return nil, err
 	}
 
 	claims := auth.GetClaims(ctx)
-	if !claims.OrganizationPermissions(ctx, org.ID).ReadOrg && !claims.Superuser(ctx) {
-		// check if the org has any public projects, this works for anonymous users as well
-		hasPublicProject, err := s.admin.DB.CheckOrganizationHasPublicProjects(ctx, org.ID)
+	perms := claims.OrganizationPermissions(ctx, org.ID)
+	if !perms.ReadOrg && !claims.Superuser(ctx) {
+		ok, err := s.admin.DB.CheckOrganizationHasPublicProjects(ctx, org.ID)
 		if err != nil {
-			return nil, status.Error(codes.Internal, err.Error())
+			return nil, err
+		}
+		if !ok {
+			return nil, status.Error(codes.PermissionDenied, "not allowed to read org")
 		}
 
-		// these are the permissions for public and for outside members
-		publicPermissions := &adminv1.OrganizationPermissions{ReadOrg: true, ReadProjects: true}
-		if hasPublicProject {
-			return &adminv1.GetOrganizationResponse{
-				Organization: organizationToDTO(org),
-				Permissions:  publicPermissions,
-			}, nil
-		}
-		// check if the user is outside members of a project in the org
-		if claims.OwnerType() == auth.OwnerTypeUser {
-			exists, err := s.admin.DB.CheckOrganizationHasOutsideUser(ctx, org.ID, claims.OwnerID())
-			if err != nil {
-				return nil, status.Error(codes.Internal, err.Error())
-			}
-			if exists {
-				return &adminv1.GetOrganizationResponse{
-					Organization: organizationToDTO(org),
-					Permissions:  publicPermissions,
-				}, nil
-			}
-		}
-		return nil, status.Error(codes.PermissionDenied, "not allowed to read org")
+		perms.ReadOrg = true
+		perms.ReadProjects = true
 	}
 
 	return &adminv1.GetOrganizationResponse{
-		Organization: organizationToDTO(org),
-		Permissions:  claims.OrganizationPermissions(ctx, org.ID),
+		Organization: s.organizationToDTO(org, perms.ManageOrg),
+		Permissions:  perms,
+	}, nil
+}
+
+func (s *Server) GetOrganizationNameForDomain(ctx context.Context, req *adminv1.GetOrganizationNameForDomainRequest) (*adminv1.GetOrganizationNameForDomainResponse, error) {
+	observability.AddRequestAttributes(ctx, attribute.String("args.domain", req.Domain))
+
+	org, err := s.admin.DB.FindOrganizationByCustomDomain(ctx, req.Domain)
+	if err != nil {
+		return nil, err
+	}
+
+	// NOTE: Not checking auth on purpose. This needs to be a public endpoint.
+
+	return &adminv1.GetOrganizationNameForDomainResponse{
+		Name: org.Name,
 	}, nil
 }
 
@@ -110,26 +107,29 @@ func (s *Server) CreateOrganization(ctx context.Context, req *adminv1.CreateOrga
 		return nil, status.Error(codes.Unauthenticated, "not authenticated as a user")
 	}
 
-	// check single user org limit for this user
 	user, err := s.admin.DB.FindUser(ctx, claims.OwnerID())
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
-	count, err := s.admin.DB.CountSingleuserOrganizationsForMemberUser(ctx, user.ID)
-	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
-	}
-	if user.QuotaSingleuserOrgs >= 0 && count >= user.QuotaSingleuserOrgs {
-		return nil, status.Errorf(codes.FailedPrecondition, "quota exceeded: you can only create %d single-user orgs", user.QuotaSingleuserOrgs)
+
+	if !claims.Superuser(ctx) {
+		// check single user org limit for this user
+		count, err := s.admin.DB.CountSingleuserOrganizationsForMemberUser(ctx, user.ID)
+		if err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+		if user.QuotaSingleuserOrgs >= 0 && count >= user.QuotaSingleuserOrgs {
+			return nil, status.Errorf(codes.FailedPrecondition, "quota exceeded: you can only create %d single-user orgs", user.QuotaSingleuserOrgs)
+		}
 	}
 
-	org, err := s.admin.CreateOrganizationForUser(ctx, user.ID, req.Name, req.Description)
+	org, err := s.admin.CreateOrganizationForUser(ctx, user.ID, user.Email, req.Name, req.Description)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
 	return &adminv1.CreateOrganizationResponse{
-		Organization: organizationToDTO(org),
+		Organization: s.organizationToDTO(org, true),
 	}, nil
 }
 
@@ -146,9 +146,9 @@ func (s *Server) DeleteOrganization(ctx context.Context, req *adminv1.DeleteOrga
 		return nil, status.Error(codes.PermissionDenied, "not allowed to delete org")
 	}
 
-	err = s.admin.DB.DeleteOrganization(ctx, req.Name)
+	_, err = s.admin.Jobs.PurgeOrg(ctx, org.ID)
 	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
+		return nil, status.Error(codes.Internal, err.Error())
 	}
 
 	return &adminv1.DeleteOrganizationResponse{}, nil
@@ -162,6 +162,9 @@ func (s *Server) UpdateOrganization(ctx context.Context, req *adminv1.UpdateOrga
 	if req.NewName != nil {
 		observability.AddRequestAttributes(ctx, attribute.String("args.new_name", *req.NewName))
 	}
+	if req.BillingEmail != nil {
+		observability.AddRequestAttributes(ctx, attribute.String("args.billing_email", *req.BillingEmail))
+	}
 
 	org, err := s.admin.DB.FindOrganizationByName(ctx, req.Name)
 	if err != nil {
@@ -173,19 +176,36 @@ func (s *Server) UpdateOrganization(ctx context.Context, req *adminv1.UpdateOrga
 		return nil, status.Error(codes.PermissionDenied, "not allowed to update org")
 	}
 
-	nameChanged := req.NewName != nil && *req.NewName != org.Name
+	logoAssetID := org.LogoAssetID
+	if req.LogoAssetId != nil { // Means it should be updated
+		if *req.LogoAssetId == "" { // Means it should be cleared
+			logoAssetID = nil
+		} else {
+			logoAssetID = req.LogoAssetId
+		}
+	}
 
+	nameChanged := req.NewName != nil && *req.NewName != org.Name
+	emailChanged := req.BillingEmail != nil && *req.BillingEmail != org.BillingEmail
 	org, err = s.admin.DB.UpdateOrganization(ctx, org.ID, &database.UpdateOrganizationOptions{
-		Name:                    valOrDefault(req.NewName, org.Name),
-		Description:             valOrDefault(req.Description, org.Description),
-		QuotaProjects:           org.QuotaProjects,
-		QuotaDeployments:        org.QuotaDeployments,
-		QuotaSlotsTotal:         org.QuotaSlotsTotal,
-		QuotaSlotsPerDeployment: org.QuotaSlotsPerDeployment,
-		QuotaOutstandingInvites: org.QuotaOutstandingInvites,
+		Name:                                valOrDefault(req.NewName, org.Name),
+		DisplayName:                         valOrDefault(req.DisplayName, org.DisplayName),
+		Description:                         valOrDefault(req.Description, org.Description),
+		LogoAssetID:                         logoAssetID,
+		CustomDomain:                        org.CustomDomain,
+		QuotaProjects:                       org.QuotaProjects,
+		QuotaDeployments:                    org.QuotaDeployments,
+		QuotaSlotsTotal:                     org.QuotaSlotsTotal,
+		QuotaSlotsPerDeployment:             org.QuotaSlotsPerDeployment,
+		QuotaOutstandingInvites:             org.QuotaOutstandingInvites,
+		QuotaStorageLimitBytesPerDeployment: org.QuotaStorageLimitBytesPerDeployment,
+		BillingCustomerID:                   org.BillingCustomerID,
+		PaymentCustomerID:                   org.PaymentCustomerID,
+		BillingEmail:                        valOrDefault(req.BillingEmail, org.BillingEmail),
+		CreatedByUserID:                     org.CreatedByUserID,
 	})
 	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, err
 	}
 
 	if nameChanged {
@@ -195,12 +215,27 @@ func (s *Server) UpdateOrganization(ctx context.Context, req *adminv1.UpdateOrga
 		}
 	}
 
+	if emailChanged {
+		if org.BillingCustomerID != "" {
+			err = s.admin.Biller.UpdateCustomerEmail(ctx, org.BillingCustomerID, org.BillingEmail)
+			if err != nil {
+				return nil, status.Errorf(codes.Internal, "failed to update billing email in biller: %v", err)
+			}
+		}
+		if org.PaymentCustomerID != "" {
+			err = s.admin.PaymentProvider.UpdateCustomerEmail(ctx, org.PaymentCustomerID, org.BillingEmail)
+			if err != nil {
+				return nil, status.Errorf(codes.Internal, "failed to update billing email in payment provider: %v", err)
+			}
+		}
+	}
+
 	return &adminv1.UpdateOrganizationResponse{
-		Organization: organizationToDTO(org),
+		Organization: s.organizationToDTO(org, true),
 	}, nil
 }
 
-func (s *Server) ListOrganizationMembers(ctx context.Context, req *adminv1.ListOrganizationMembersRequest) (*adminv1.ListOrganizationMembersResponse, error) {
+func (s *Server) ListOrganizationMemberUsers(ctx context.Context, req *adminv1.ListOrganizationMemberUsersRequest) (*adminv1.ListOrganizationMemberUsersResponse, error) {
 	observability.AddRequestAttributes(ctx,
 		attribute.String("args.org", req.Organization),
 	)
@@ -231,12 +266,12 @@ func (s *Server) ListOrganizationMembers(ctx context.Context, req *adminv1.ListO
 		nextToken = marshalPageToken(members[len(members)-1].Email)
 	}
 
-	dtos := make([]*adminv1.Member, len(members))
+	dtos := make([]*adminv1.MemberUser, len(members))
 	for i, user := range members {
-		dtos[i] = memberToPB(user)
+		dtos[i] = memberUserToPB(user)
 	}
 
-	return &adminv1.ListOrganizationMembersResponse{
+	return &adminv1.ListOrganizationMemberUsersResponse{
 		Members:       dtos,
 		NextPageToken: nextToken,
 	}, nil
@@ -285,7 +320,7 @@ func (s *Server) ListOrganizationInvites(ctx context.Context, req *adminv1.ListO
 	}, nil
 }
 
-func (s *Server) AddOrganizationMember(ctx context.Context, req *adminv1.AddOrganizationMemberRequest) (*adminv1.AddOrganizationMemberResponse, error) {
+func (s *Server) AddOrganizationMemberUser(ctx context.Context, req *adminv1.AddOrganizationMemberUserRequest) (*adminv1.AddOrganizationMemberUserResponse, error) {
 	observability.AddRequestAttributes(ctx,
 		attribute.String("args.org", req.Organization),
 		attribute.String("args.role", req.Role),
@@ -297,7 +332,8 @@ func (s *Server) AddOrganizationMember(ctx context.Context, req *adminv1.AddOrga
 	}
 
 	claims := auth.GetClaims(ctx)
-	if !claims.OrganizationPermissions(ctx, org.ID).ManageOrgMembers {
+	forceAccess := claims.Superuser(ctx) && req.SuperuserForceAccess
+	if !claims.OrganizationPermissions(ctx, org.ID).ManageOrgMembers && !forceAccess {
 		return nil, status.Error(codes.PermissionDenied, "not allowed to add org members")
 	}
 
@@ -338,15 +374,27 @@ func (s *Server) AddOrganizationMember(ctx context.Context, req *adminv1.AddOrga
 			RoleID:    role.ID,
 		})
 		if err != nil {
-			return nil, status.Error(codes.Internal, err.Error())
+			if !errors.Is(err, database.ErrNotUnique) {
+				return nil, err
+			}
+			// Already invited. Update the invitation role.
+			invite, err := s.admin.DB.FindOrganizationInvite(ctx, org.ID, req.Email)
+			if err != nil {
+				return nil, err
+			}
+			// Update the role of the invite
+			err = s.admin.DB.UpdateOrganizationInviteRole(ctx, invite.ID, role.ID)
+			if err != nil {
+				return nil, err
+			}
+			// Fallthrough so we send the email again.
 		}
 
 		// Send invitation email
 		err = s.admin.Email.SendOrganizationInvite(&email.OrganizationInvite{
 			ToEmail:       req.Email,
 			ToName:        "",
-			AdminURL:      s.opts.ExternalURL,
-			FrontendURL:   s.opts.FrontendURL,
+			AcceptURL:     s.admin.URLs.WithCustomDomain(org.CustomDomain).OrganizationInviteAccept(org.Name),
 			OrgName:       org.Name,
 			RoleName:      role.Name,
 			InvitedByName: invitedByName,
@@ -355,39 +403,47 @@ func (s *Server) AddOrganizationMember(ctx context.Context, req *adminv1.AddOrga
 			return nil, status.Error(codes.Internal, err.Error())
 		}
 
-		return &adminv1.AddOrganizationMemberResponse{
+		return &adminv1.AddOrganizationMemberUserResponse{
 			PendingSignup: true,
 		}, nil
 	}
 
-	ctx, tx, err := s.admin.DB.NewTx(ctx)
-	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
-	}
-	defer func() { _ = tx.Rollback() }()
+	// Insert the user in the org and AllUsergroup transactionally.
+	err = func() error {
+		ctx, tx, err := s.admin.DB.NewTx(ctx)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
 
-	err = s.admin.DB.InsertOrganizationMemberUser(ctx, org.ID, user.ID, role.ID)
-	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
-	}
+		err = s.admin.DB.InsertOrganizationMemberUser(ctx, org.ID, user.ID, role.ID)
+		if err != nil {
+			return err
+		}
 
-	err = s.admin.DB.InsertUsergroupMember(ctx, *org.AllUsergroupID, user.ID)
+		err = s.admin.DB.InsertUsergroupMemberUser(ctx, *org.AllUsergroupID, user.ID)
+		if err != nil {
+			return fmt.Errorf("failed to add user to all user group: %w", err)
+		}
+
+		return tx.Commit()
+	}()
 	if err != nil {
 		if !errors.Is(err, database.ErrNotUnique) {
-			return nil, status.Error(codes.Internal, err.Error())
+			return nil, err
 		}
-		// If the user is already in the all user group, we can ignore the error
-	}
 
-	err = tx.Commit()
-	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
+		// The user is already in the org. Instead of erroring, we update their role and fallthrough to send the email again.
+		err = s.admin.DB.UpdateOrganizationMemberUserRole(ctx, org.ID, user.ID, role.ID)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	err = s.admin.Email.SendOrganizationAddition(&email.OrganizationAddition{
 		ToEmail:       req.Email,
 		ToName:        "",
-		FrontendURL:   s.opts.FrontendURL,
+		OpenURL:       s.admin.URLs.WithCustomDomain(org.CustomDomain).Organization(org.Name),
 		OrgName:       org.Name,
 		RoleName:      role.Name,
 		InvitedByName: invitedByName,
@@ -396,12 +452,12 @@ func (s *Server) AddOrganizationMember(ctx context.Context, req *adminv1.AddOrga
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
-	return &adminv1.AddOrganizationMemberResponse{
+	return &adminv1.AddOrganizationMemberUserResponse{
 		PendingSignup: false,
 	}, nil
 }
 
-func (s *Server) RemoveOrganizationMember(ctx context.Context, req *adminv1.RemoveOrganizationMemberRequest) (*adminv1.RemoveOrganizationMemberResponse, error) {
+func (s *Server) RemoveOrganizationMemberUser(ctx context.Context, req *adminv1.RemoveOrganizationMemberUserRequest) (*adminv1.RemoveOrganizationMemberUserResponse, error) {
 	observability.AddRequestAttributes(ctx,
 		attribute.String("args.org", req.Organization),
 		attribute.Bool("args.keep_project_roles", req.KeepProjectRoles),
@@ -412,45 +468,56 @@ func (s *Server) RemoveOrganizationMember(ctx context.Context, req *adminv1.Remo
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
-	claims := auth.GetClaims(ctx)
-	if !claims.OrganizationPermissions(ctx, org.ID).ManageOrgMembers {
-		return nil, status.Error(codes.PermissionDenied, "not allowed to remove org members")
-	}
-
 	user, err := s.admin.DB.FindUserByEmail(ctx, req.Email)
 	if err != nil {
 		if !errors.Is(err, database.ErrNotFound) {
 			return nil, status.Error(codes.Internal, err.Error())
 		}
-		// check if there is a pending invite
+
+		// Only admins can remove pending invites.
+		// NOTE: If we change invites to accept/decline (instead of auto-accept on signup), we need to revisit this.
+		claims := auth.GetClaims(ctx)
+		if !claims.OrganizationPermissions(ctx, org.ID).ManageOrgMembers {
+			return nil, status.Error(codes.PermissionDenied, "not allowed to remove org members")
+		}
+
+		// Check if there is a pending invite
 		invite, err := s.admin.DB.FindOrganizationInvite(ctx, org.ID, req.Email)
 		if err != nil {
-			if errors.Is(err, database.ErrNotFound) {
-				return nil, status.Error(codes.InvalidArgument, "user not found")
-			}
-			return nil, status.Error(codes.Internal, err.Error())
+			return nil, err
 		}
+
 		err = s.admin.DB.DeleteOrganizationInvite(ctx, invite.ID)
 		if err != nil {
 			return nil, status.Error(codes.Internal, err.Error())
 		}
-		return &adminv1.RemoveOrganizationMemberResponse{}, nil
+
+		return &adminv1.RemoveOrganizationMemberUserResponse{}, nil
 	}
 
+	// The caller must either have ManageOrgMembers permission or be the user being removed.
+	claims := auth.GetClaims(ctx)
+	isManager := claims.OrganizationPermissions(ctx, org.ID).ManageOrgMembers
+	isSelf := claims.OwnerType() == auth.OwnerTypeUser && claims.OwnerID() == user.ID
+	if !isManager && !isSelf {
+		return nil, status.Error(codes.PermissionDenied, "not allowed to remove org members")
+	}
+
+	if org.BillingEmail == user.Email {
+		return nil, status.Error(codes.InvalidArgument, "this user is the billing email for the organization, please update the billing email before removing")
+	}
+
+	// Check that the user is not the last admin
 	role, err := s.admin.DB.FindOrganizationRole(ctx, database.OrganizationRoleNameAdmin)
 	if err != nil {
-		panic(err)
+		return nil, status.Error(codes.Internal, err.Error())
 	}
-
-	// check if the user is the last owner
-	// TODO optimize this, may be extract roles during auth token validation
-	//  and store as part of the claims and fetch admins only if the user is an admin
 	users, err := s.admin.DB.FindOrganizationMemberUsersByRole(ctx, org.ID, role.ID)
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 	if len(users) == 1 && users[0].ID == user.ID {
-		return nil, status.Error(codes.InvalidArgument, "cannot remove the last owner")
+		return nil, status.Error(codes.InvalidArgument, "cannot remove the last admin member")
 	}
 
 	ctx, tx, err := s.admin.DB.NewTx(ctx)
@@ -458,13 +525,14 @@ func (s *Server) RemoveOrganizationMember(ctx context.Context, req *adminv1.Remo
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 	defer func() { _ = tx.Rollback() }()
+
 	err = s.admin.DB.DeleteOrganizationMemberUser(ctx, org.ID, user.ID)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
-	// delete from all user group
-	err = s.admin.DB.DeleteUsergroupMember(ctx, *org.AllUsergroupID, user.ID)
+	// delete from all user groups of the org
+	err = s.admin.DB.DeleteUsergroupsMemberUser(ctx, org.ID, user.ID)
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
@@ -482,10 +550,10 @@ func (s *Server) RemoveOrganizationMember(ctx context.Context, req *adminv1.Remo
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
-	return &adminv1.RemoveOrganizationMemberResponse{}, nil
+	return &adminv1.RemoveOrganizationMemberUserResponse{}, nil
 }
 
-func (s *Server) SetOrganizationMemberRole(ctx context.Context, req *adminv1.SetOrganizationMemberRoleRequest) (*adminv1.SetOrganizationMemberRoleResponse, error) {
+func (s *Server) SetOrganizationMemberUserRole(ctx context.Context, req *adminv1.SetOrganizationMemberUserRoleRequest) (*adminv1.SetOrganizationMemberUserRoleResponse, error) {
 	observability.AddRequestAttributes(ctx,
 		attribute.String("args.org", req.Organization),
 		attribute.String("args.role", req.Role),
@@ -514,16 +582,13 @@ func (s *Server) SetOrganizationMemberRole(ctx context.Context, req *adminv1.Set
 		// Check if there is a pending invite for this user
 		invite, err := s.admin.DB.FindOrganizationInvite(ctx, org.ID, req.Email)
 		if err != nil {
-			if errors.Is(err, database.ErrNotFound) {
-				return nil, status.Error(codes.InvalidArgument, "user not found")
-			}
-			return nil, status.Error(codes.Internal, err.Error())
+			return nil, err
 		}
 		err = s.admin.DB.UpdateOrganizationInviteRole(ctx, invite.ID, role.ID)
 		if err != nil {
-			return nil, status.Error(codes.Internal, err.Error())
+			return nil, err
 		}
-		return &adminv1.SetOrganizationMemberRoleResponse{}, nil
+		return &adminv1.SetOrganizationMemberUserRoleResponse{}, nil
 	}
 
 	// Check if the user is the last owner
@@ -545,10 +610,10 @@ func (s *Server) SetOrganizationMemberRole(ctx context.Context, req *adminv1.Set
 
 	err = s.admin.DB.UpdateOrganizationMemberUserRole(ctx, org.ID, user.ID, role.ID)
 	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
+		return nil, err
 	}
 
-	return &adminv1.SetOrganizationMemberRoleResponse{}, nil
+	return &adminv1.SetOrganizationMemberUserRoleResponse{}, nil
 }
 
 func (s *Server) LeaveOrganization(ctx context.Context, req *adminv1.LeaveOrganizationRequest) (*adminv1.LeaveOrganizationResponse, error) {
@@ -576,6 +641,15 @@ func (s *Server) LeaveOrganization(ctx context.Context, req *adminv1.LeaveOrgani
 		panic(err)
 	}
 
+	user, err := s.admin.DB.FindUser(ctx, claims.OwnerID())
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	if org.BillingEmail == user.Email {
+		return nil, status.Error(codes.InvalidArgument, "this user is the billing email for the organization, please update the billing email before leaving")
+	}
+
 	// check if the user is the last owner
 	// TODO optimize this, may be extract roles during auth token validation
 	//  and store as part of the claims and fetch admins only if the user is an admin
@@ -598,11 +672,12 @@ func (s *Server) LeaveOrganization(ctx context.Context, req *adminv1.LeaveOrgani
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
-	// delete from all user group
-	err = s.admin.DB.DeleteUsergroupMember(ctx, *org.AllUsergroupID, claims.OwnerID())
+	// delete from all user groups of the org
+	err = s.admin.DB.DeleteUsergroupsMemberUser(ctx, org.ID, claims.OwnerID())
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
+
 	err = tx.Commit()
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
@@ -625,10 +700,7 @@ func (s *Server) CreateWhitelistedDomain(ctx context.Context, req *adminv1.Creat
 
 	org, err := s.admin.DB.FindOrganizationByName(ctx, req.Organization)
 	if err != nil {
-		if errors.Is(err, database.ErrNotFound) {
-			return nil, status.Error(codes.NotFound, "org not found")
-		}
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, err
 	}
 
 	if !claims.Superuser(ctx) {
@@ -651,10 +723,7 @@ func (s *Server) CreateWhitelistedDomain(ctx context.Context, req *adminv1.Creat
 
 	role, err := s.admin.DB.FindOrganizationRole(ctx, req.Role)
 	if err != nil {
-		if errors.Is(err, database.ErrNotFound) {
-			return nil, status.Error(codes.NotFound, "role not found")
-		}
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, err
 	}
 
 	// find existing users belonging to the whitelisted domain to the org
@@ -687,21 +756,20 @@ func (s *Server) CreateWhitelistedDomain(ctx context.Context, req *adminv1.Creat
 		OrgRoleID: role.ID,
 		Domain:    req.Domain,
 	})
-
 	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, err
 	}
 
 	for _, user := range newUsers {
 		err = s.admin.DB.InsertOrganizationMemberUser(ctx, org.ID, user.ID, role.ID)
 		if err != nil {
-			return nil, status.Error(codes.Internal, err.Error())
+			return nil, err
 		}
 
 		// add to all user group
-		err = s.admin.DB.InsertUsergroupMember(ctx, *org.AllUsergroupID, user.ID)
+		err = s.admin.DB.InsertUsergroupMemberUser(ctx, *org.AllUsergroupID, user.ID)
 		if err != nil {
-			return nil, status.Error(codes.Internal, err.Error())
+			return nil, err
 		}
 	}
 
@@ -723,10 +791,7 @@ func (s *Server) RemoveWhitelistedDomain(ctx context.Context, req *adminv1.Remov
 
 	org, err := s.admin.DB.FindOrganizationByName(ctx, req.Organization)
 	if err != nil {
-		if errors.Is(err, database.ErrNotFound) {
-			return nil, status.Error(codes.NotFound, "org not found")
-		}
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, err
 	}
 
 	if !(claims.OrganizationPermissions(ctx, org.ID).ManageOrg || claims.Superuser(ctx)) {
@@ -735,10 +800,7 @@ func (s *Server) RemoveWhitelistedDomain(ctx context.Context, req *adminv1.Remov
 
 	invite, err := s.admin.DB.FindOrganizationWhitelistedDomain(ctx, org.ID, req.Domain)
 	if err != nil {
-		if errors.Is(err, database.ErrNotFound) {
-			return nil, status.Errorf(codes.NotFound, "whitelist not found for org %q and domain %q", org.Name, req.Domain)
-		}
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, err
 	}
 
 	err = s.admin.DB.DeleteOrganizationWhitelistedDomain(ctx, invite.ID)
@@ -758,10 +820,7 @@ func (s *Server) ListWhitelistedDomains(ctx context.Context, req *adminv1.ListWh
 
 	org, err := s.admin.DB.FindOrganizationByName(ctx, req.Organization)
 	if err != nil {
-		if errors.Is(err, database.ErrNotFound) {
-			return nil, status.Error(codes.NotFound, "org not found")
-		}
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, err
 	}
 
 	if !(claims.OrganizationPermissions(ctx, org.ID).ManageOrg || claims.Superuser(ctx)) {
@@ -784,7 +843,7 @@ func (s *Server) ListWhitelistedDomains(ctx context.Context, req *adminv1.ListWh
 }
 
 func (s *Server) SudoUpdateOrganizationQuotas(ctx context.Context, req *adminv1.SudoUpdateOrganizationQuotasRequest) (*adminv1.SudoUpdateOrganizationQuotasResponse, error) {
-	observability.AddRequestAttributes(ctx, attribute.String("args.org", req.OrgName))
+	observability.AddRequestAttributes(ctx, attribute.String("args.org", req.Organization))
 	if req.Projects != nil {
 		observability.AddRequestAttributes(ctx, attribute.Int("args.projects", int(*req.Projects)))
 	}
@@ -806,19 +865,27 @@ func (s *Server) SudoUpdateOrganizationQuotas(ctx context.Context, req *adminv1.
 		return nil, status.Error(codes.PermissionDenied, "only superusers can manage quotas")
 	}
 
-	org, err := s.admin.DB.FindOrganizationByName(ctx, req.OrgName)
+	org, err := s.admin.DB.FindOrganizationByName(ctx, req.Organization)
 	if err != nil {
 		return nil, err
 	}
 
 	opts := &database.UpdateOrganizationOptions{
-		Name:                    req.OrgName,
-		Description:             org.Description,
-		QuotaProjects:           int(valOrDefault(req.Projects, uint32(org.QuotaProjects))),
-		QuotaDeployments:        int(valOrDefault(req.Deployments, uint32(org.QuotaDeployments))),
-		QuotaSlotsTotal:         int(valOrDefault(req.SlotsTotal, uint32(org.QuotaSlotsTotal))),
-		QuotaSlotsPerDeployment: int(valOrDefault(req.SlotsPerDeployment, uint32(org.QuotaSlotsPerDeployment))),
-		QuotaOutstandingInvites: int(valOrDefault(req.OutstandingInvites, uint32(org.QuotaOutstandingInvites))),
+		Name:                                req.Organization,
+		DisplayName:                         org.DisplayName,
+		Description:                         org.Description,
+		LogoAssetID:                         org.LogoAssetID,
+		CustomDomain:                        org.CustomDomain,
+		QuotaProjects:                       int(valOrDefault(req.Projects, int32(org.QuotaProjects))),
+		QuotaDeployments:                    int(valOrDefault(req.Deployments, int32(org.QuotaDeployments))),
+		QuotaSlotsTotal:                     int(valOrDefault(req.SlotsTotal, int32(org.QuotaSlotsTotal))),
+		QuotaSlotsPerDeployment:             int(valOrDefault(req.SlotsPerDeployment, int32(org.QuotaSlotsPerDeployment))),
+		QuotaOutstandingInvites:             int(valOrDefault(req.OutstandingInvites, int32(org.QuotaOutstandingInvites))),
+		QuotaStorageLimitBytesPerDeployment: valOrDefault(req.StorageLimitBytesPerDeployment, org.QuotaStorageLimitBytesPerDeployment),
+		BillingCustomerID:                   org.BillingCustomerID,
+		PaymentCustomerID:                   org.PaymentCustomerID,
+		BillingEmail:                        org.BillingEmail,
+		CreatedByUserID:                     org.CreatedByUserID,
 	}
 
 	updatedOrg, err := s.admin.DB.UpdateOrganization(ctx, org.ID, opts)
@@ -827,25 +894,98 @@ func (s *Server) SudoUpdateOrganizationQuotas(ctx context.Context, req *adminv1.
 	}
 
 	return &adminv1.SudoUpdateOrganizationQuotasResponse{
-		Organization: organizationToDTO(updatedOrg),
+		Organization: s.organizationToDTO(updatedOrg, true),
 	}, nil
 }
 
-func organizationToDTO(o *database.Organization) *adminv1.Organization {
-	return &adminv1.Organization{
-		Id:          o.ID,
-		Name:        o.Name,
-		Description: o.Description,
+func (s *Server) SudoUpdateOrganizationCustomDomain(ctx context.Context, req *adminv1.SudoUpdateOrganizationCustomDomainRequest) (*adminv1.SudoUpdateOrganizationCustomDomainResponse, error) {
+	observability.AddRequestAttributes(ctx,
+		attribute.String("args.org", req.Name),
+		attribute.String("args.custom_domain", req.CustomDomain),
+	)
+
+	claims := auth.GetClaims(ctx)
+	if !claims.Superuser(ctx) {
+		return nil, status.Error(codes.PermissionDenied, "only superusers can manage custom domains")
+	}
+
+	org, err := s.admin.DB.FindOrganizationByName(ctx, req.Name)
+	if err != nil {
+		return nil, err
+	}
+
+	org, err = s.admin.DB.UpdateOrganization(ctx, org.ID, &database.UpdateOrganizationOptions{
+		Name:                                org.Name,
+		DisplayName:                         org.DisplayName,
+		Description:                         org.Description,
+		LogoAssetID:                         org.LogoAssetID,
+		CustomDomain:                        req.CustomDomain,
+		QuotaProjects:                       org.QuotaProjects,
+		QuotaDeployments:                    org.QuotaDeployments,
+		QuotaSlotsTotal:                     org.QuotaSlotsTotal,
+		QuotaSlotsPerDeployment:             org.QuotaSlotsPerDeployment,
+		QuotaOutstandingInvites:             org.QuotaOutstandingInvites,
+		QuotaStorageLimitBytesPerDeployment: org.QuotaStorageLimitBytesPerDeployment,
+		BillingCustomerID:                   org.BillingCustomerID,
+		PaymentCustomerID:                   org.PaymentCustomerID,
+		BillingEmail:                        org.BillingEmail,
+		CreatedByUserID:                     org.CreatedByUserID,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &adminv1.SudoUpdateOrganizationCustomDomainResponse{
+		Organization: s.organizationToDTO(org, true),
+	}, nil
+}
+
+func (s *Server) organizationToDTO(o *database.Organization, privileged bool) *adminv1.Organization {
+	var logoURL string
+	if o.LogoAssetID != nil {
+		logoURL = s.admin.URLs.WithCustomDomain(o.CustomDomain).Asset(*o.LogoAssetID)
+	}
+
+	res := &adminv1.Organization{
+		Id:           o.ID,
+		Name:         o.Name,
+		DisplayName:  o.DisplayName,
+		Description:  o.Description,
+		LogoUrl:      logoURL,
+		CustomDomain: o.CustomDomain,
 		Quotas: &adminv1.OrganizationQuotas{
-			Projects:           uint32(o.QuotaProjects),
-			Deployments:        uint32(o.QuotaDeployments),
-			SlotsTotal:         uint32(o.QuotaSlotsTotal),
-			SlotsPerDeployment: uint32(o.QuotaSlotsPerDeployment),
-			OutstandingInvites: uint32(o.QuotaOutstandingInvites),
+			Projects:                       int32(o.QuotaProjects),
+			Deployments:                    int32(o.QuotaDeployments),
+			SlotsTotal:                     int32(o.QuotaSlotsTotal),
+			SlotsPerDeployment:             int32(o.QuotaSlotsPerDeployment),
+			OutstandingInvites:             int32(o.QuotaOutstandingInvites),
+			StorageLimitBytesPerDeployment: o.QuotaStorageLimitBytesPerDeployment,
 		},
 		CreatedOn: timestamppb.New(o.CreatedOn),
 		UpdatedOn: timestamppb.New(o.UpdatedOn),
 	}
+
+	if privileged {
+		res.BillingCustomerId = o.BillingCustomerID
+		res.PaymentCustomerId = o.PaymentCustomerID
+		res.BillingEmail = o.BillingEmail
+	}
+
+	return res
+}
+
+func valOrEmptyString(v *int) string {
+	if v != nil {
+		return strconv.Itoa(*v)
+	}
+	return ""
+}
+
+func val64OrEmptyString(v *int64) string {
+	if v != nil {
+		return strconv.FormatInt(*v, 10)
+	}
+	return ""
 }
 
 func whitelistedDomainToPB(a *database.OrganizationWhitelistedDomainWithJoinedRoleNames) *adminv1.WhitelistedDomain {

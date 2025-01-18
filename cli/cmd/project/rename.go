@@ -18,39 +18,44 @@ func RenameCmd(ch *cmdutil.Helper) *cobra.Command {
 		Short: "Rename project",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			cfg := ch.Config
 
-			client, err := cmdutil.Client(cfg)
+			client, err := ch.Client()
 			if err != nil {
 				return err
 			}
-			defer client.Close()
 
-			ch.Printer.Println("Warn: Renaming an project would invalidate dashboard URLs")
+			ch.PrintfWarn("Warn: Renaming a project will invalidate dashboard URLs\n")
 
-			if !cmd.Flags().Changed("project") && cfg.Interactive {
-				projectNames, err := cmdutil.ProjectNamesByOrg(ctx, client, cfg.Org)
+			if !cmd.Flags().Changed("project") && ch.Interactive {
+				projectNames, err := projectNames(ctx, ch)
 				if err != nil {
 					return err
 				}
 
-				name = cmdutil.SelectPrompt("Select project to rename", projectNames, "")
+				name, err = cmdutil.SelectPrompt("Select project to rename", projectNames, "")
+				if err != nil {
+					return err
+				}
 			}
 
-			if cfg.Interactive {
+			if ch.Interactive {
 				err = cmdutil.SetFlagsByInputPrompts(*cmd, "new-name")
 				if err != nil {
 					return err
 				}
 			}
 
-			msg := fmt.Sprintf("Do you want to rename the project \"%s\" to \"%s\"?", color.YellowString(name), color.YellowString(newName))
-			if !cmdutil.ConfirmPrompt(msg, "", false) {
+			msg := fmt.Sprintf("Do you want to rename the project \"%s\" to \"%s\"?", color.YellowString(name), color.YellowString(newName)) // nolint:gocritic // Because it uses colors
+			ok, err := cmdutil.ConfirmPrompt(msg, "", false)
+			if err != nil {
+				return err
+			}
+			if !ok {
 				return nil
 			}
 
 			updatedProj, err := client.UpdateProject(ctx, &adminv1.UpdateProjectRequest{
-				OrganizationName: cfg.Org,
+				OrganizationName: ch.Org,
 				Name:             name,
 				NewName:          &newName,
 			})
@@ -58,9 +63,11 @@ func RenameCmd(ch *cmdutil.Helper) *cobra.Command {
 				return err
 			}
 
-			ch.Printer.PrintlnSuccess("Renamed project")
-			ch.Printer.PrintlnSuccess(fmt.Sprintf("New web url is: %s\n", updatedProj.Project.FrontendUrl))
-			return ch.Printer.PrintResource(toRow(updatedProj.Project))
+			ch.PrintfSuccess("Renamed project\n")
+			ch.PrintfSuccess("New web url is: %s\n", updatedProj.Project.FrontendUrl)
+			ch.PrintProjects([]*adminv1.Project{updatedProj.Project})
+
+			return nil
 		},
 	}
 

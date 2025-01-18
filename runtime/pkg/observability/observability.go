@@ -15,7 +15,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	"go.uber.org/zap"
 )
 
@@ -52,13 +52,14 @@ func Start(ctx context.Context, logger *zap.Logger, opts *Options) (ShutdownFunc
 	}))
 
 	// Create resource representing the currently running service
-	res, err := resource.Merge(
-		resource.Default(),
-		resource.NewWithAttributes(
-			semconv.SchemaURL,
+	res, err := resource.New(ctx,
+		resource.WithContainer(),
+		resource.WithSchemaURL(semconv.SchemaURL),
+		resource.WithAttributes(
 			semconv.ServiceName(opts.ServiceName),
 			semconv.ServiceVersion(opts.ServiceVersion),
 		),
+		resource.WithFromEnv(),
 	)
 	if err != nil {
 		return nil, err

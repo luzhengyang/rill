@@ -11,9 +11,12 @@ import (
 )
 
 type ColumnRugHistogram struct {
-	TableName  string
-	ColumnName string
-	Result     []*runtimev1.NumericOutliers_Outlier
+	Connector      string
+	Database       string
+	DatabaseSchema string
+	TableName      string
+	ColumnName     string
+	Result         []*runtimev1.NumericOutliers_Outlier
 }
 
 var _ runtime.Query = &ColumnRugHistogram{}
@@ -51,26 +54,31 @@ func (q *ColumnRugHistogram) UnmarshalResult(v any) error {
 }
 
 func (q *ColumnRugHistogram) Resolve(ctx context.Context, rt *runtime.Runtime, instanceID string, priority int) error {
-	olap, release, err := rt.OLAP(ctx, instanceID)
+	olap, release, err := rt.OLAP(ctx, instanceID, q.Connector)
 	if err != nil {
 		return err
 	}
 	defer release()
 
-	if olap.Dialect() != drivers.DialectDuckDB {
+	if olap.Dialect() != drivers.DialectDuckDB && olap.Dialect() != drivers.DialectClickHouse {
 		return fmt.Errorf("not available for dialect '%s'", olap.Dialect())
 	}
 
-	min, max, rng, err := getMinMaxRange(ctx, olap, q.ColumnName, q.TableName, priority)
+	if olap.Dialect() == drivers.DialectClickHouse {
+		// Returning early with empty results because this query tends to hang on ClickHouse.
+		return nil
+	}
+
+	minVal, maxVal, rng, err := getMinMaxRange(ctx, olap, q.ColumnName, q.Database, q.DatabaseSchema, q.TableName, priority)
 	if err != nil {
 		return err
 	}
-	if !min.Valid || !max.Valid || !rng.Valid {
+	if minVal == nil || maxVal == nil || rng == nil {
 		return nil
 	}
 
 	sanitizedColumnName := safeName(q.ColumnName)
-	outlierPseudoBucketSize := 500
+	outlierPseudoBucketCount := 500
 	selectColumn := fmt.Sprintf("%s::DOUBLE", sanitizedColumnName)
 
 	rugSQL := fmt.Sprintf(
@@ -84,15 +92,15 @@ func (q *ColumnRugHistogram) Resolve(ctx context.Context, rt *runtime.Runtime, i
 		WHERE %[2]s IS NOT NULL
   ), buckets AS (
 		SELECT
-		  range as bucket,
-		  (range) * (%[7]v) / %[4]v + (%[5]v) as low,
-		  (range + 1) * (%[7]v) / %[4]v + (%[5]v) as high
-		FROM range(0, %[4]v, 1)
+		`+rangeNumbersCol(olap.Dialect())+`::FLOAT as bucket, -- range
+		  (bucket) * (%[7]v) / %[4]v + (%[5]v) AS low, -- bucket * (max-min) / bucketCount + min
+		  (bucket + 1) * (%[7]v) / %[4]v + (%[5]v) AS high -- (bucket+1) * (max-min) / bucketCount + min
+		FROM `+rangeNumbers(olap.Dialect())+`(0, %[4]v) -- range(0,bucketCount)
 	),
 	-- bin the values
 	binned_data AS (
 		SELECT 
-		  FLOOR((value - (%[5]v)) / (%[7]v) * %[4]v) as bucket
+		  FLOOR((value - (%[5]v)) / (%[7]v) * %[4]v) as bucket -- floor((value - min) / (max-min) * bucketCount)
 		from values
 	),
 	-- join the bucket set with the binned values to generate the histogram
@@ -110,7 +118,7 @@ func (q *ColumnRugHistogram) Resolve(ctx context.Context, rt *runtime.Runtime, i
 	-- calculate the right edge, sine in histogram_stage we don't look at the values that
 	-- might be the largest.
 	right_edge AS (
-		SELECT count(*) as c from values WHERE value = (%[6]v)
+		SELECT count(*) as c from values WHERE value = (%[6]v) -- value = max
 	), histrogram_with_edge AS (
 	  SELECT
 			bucket,
@@ -125,17 +133,18 @@ func (q *ColumnRugHistogram) Resolve(ctx context.Context, rt *runtime.Runtime, i
 		low,
 		high,
 		CASE WHEN count>0 THEN true ELSE false END AS present,
-		count
+		ifNull(count, 0)
 	  FROM histrogram_with_edge
 	  WHERE present=true
+	  ORDER BY bucket
 `,
-		selectColumn,
-		sanitizedColumnName,
-		safeName(q.TableName),
-		outlierPseudoBucketSize,
-		min.Float64,
-		max.Float64,
-		rng.Float64,
+		selectColumn,        // 1
+		sanitizedColumnName, // 2
+		olap.Dialect().EscapeTable(q.Database, q.DatabaseSchema, q.TableName), // 3
+		outlierPseudoBucketCount, // 4
+		*minVal,                  // 5
+		*maxVal,                  // 6
+		*rng,                     // 7
 	)
 
 	outlierResults, err := olap.Execute(ctx, &drivers.Statement{
@@ -170,4 +179,22 @@ func (q *ColumnRugHistogram) Resolve(ctx context.Context, rt *runtime.Runtime, i
 
 func (q *ColumnRugHistogram) Export(ctx context.Context, rt *runtime.Runtime, instanceID string, w io.Writer, opts *runtime.ExportOptions) error {
 	return ErrExportNotSupported
+}
+
+func rangeNumbers(dialect drivers.Dialect) string {
+	switch dialect {
+	case drivers.DialectClickHouse:
+		return "numbers"
+	default:
+		return "range"
+	}
+}
+
+func rangeNumbersCol(dialect drivers.Dialect) string {
+	switch dialect {
+	case drivers.DialectClickHouse:
+		return "number"
+	default:
+		return "range"
+	}
 }

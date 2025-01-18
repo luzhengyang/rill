@@ -1,52 +1,49 @@
-import {
-  acceptCompletion,
-  closeBrackets,
-  closeBracketsKeymap,
-  completionKeymap,
-} from "@codemirror/autocomplete";
-import {
-  defaultKeymap,
-  history,
-  historyKeymap,
-  indentWithTab,
-} from "@codemirror/commands";
-import {
-  bracketMatching,
-  defaultHighlightStyle,
-  indentOnInput,
-  syntaxHighlighting,
-} from "@codemirror/language";
-import { lintKeymap } from "@codemirror/lint";
-import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
-import { EditorState, Prec } from "@codemirror/state";
-import {
-  drawSelection,
-  dropCursor,
-  highlightActiveLine,
-  highlightActiveLineGutter,
-  highlightSpecialChars,
-  keymap,
-  rectangularSelection,
-} from "@codemirror/view";
-import { indentGuide } from "../indent-guide";
+import { acceptCompletion } from "@codemirror/autocomplete";
+import { indentWithTab } from "@codemirror/commands";
 import { lineStatus } from "../line-status";
 import { editorTheme } from "../theme";
+import { indentationMarkers } from "@replit/codemirror-indentation-markers";
+import {
+  keymap,
+  highlightSpecialChars,
+  drawSelection,
+  highlightActiveLine,
+  dropCursor,
+  rectangularSelection,
+  crosshairCursor,
+  highlightActiveLineGutter,
+} from "@codemirror/view";
+import { EditorState, Prec } from "@codemirror/state";
+import {
+  defaultHighlightStyle,
+  syntaxHighlighting,
+  indentOnInput,
+  bracketMatching,
+  foldKeymap,
+} from "@codemirror/language";
+import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
+import { searchKeymap, highlightSelectionMatches } from "@codemirror/search";
+import {
+  autocompletion,
+  completionKeymap,
+  closeBrackets,
+  closeBracketsKeymap,
+} from "@codemirror/autocomplete";
+import { lintKeymap } from "@codemirror/lint";
 
-/** the base extension adds
- * - a theme
- * - the line status extension
- * - the indent guide extension
- * - a bunch of useful code mirror extensions
+/**
+ * https://github.com/codemirror/basic-setup/blob/main/src/codemirror.ts
+ * https://codemirror.net/docs/ref/#codemirror.basicSetup
  *
- * This is the extension you should use for most editors.
  */
+
 export const base = () => [
-  editorTheme(),
-  lineStatus(),
-  indentGuide(),
+  // BASE EXTENSIONS
+  // lineNumbers(),
   highlightActiveLineGutter(),
   highlightSpecialChars(),
   history(),
+  // foldGutter(),
   drawSelection(),
   dropCursor(),
   EditorState.allowMultipleSelections.of(true),
@@ -54,7 +51,9 @@ export const base = () => [
   syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
   bracketMatching(),
   closeBrackets(),
+  autocompletion(),
   rectangularSelection(),
+  crosshairCursor(),
   highlightActiveLine(),
   highlightSelectionMatches(),
   keymap.of([
@@ -62,17 +61,22 @@ export const base = () => [
     ...defaultKeymap,
     ...searchKeymap,
     ...historyKeymap,
+    ...foldKeymap,
     ...completionKeymap,
     ...lintKeymap,
-    indentWithTab,
   ]),
+
+  // ADDITIONAL EXTENSIONS
+  editorTheme(),
+  lineStatus(),
+  indentationMarkers(),
   Prec.highest(
     keymap.of([
       {
         key: "Tab",
         run: acceptCompletion,
       },
-    ])
+    ]),
   ),
   keymap.of([indentWithTab]),
 ];

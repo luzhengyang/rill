@@ -1,8 +1,6 @@
 package rillv1
 
 import (
-	"context"
-
 	"github.com/mazznoer/csscolorparser"
 	runtimev1 "github.com/rilldata/rill/proto/gen/rill/runtime/v1"
 )
@@ -17,34 +15,16 @@ type ThemeYAML struct {
 }
 
 // parseTheme parses a theme definition and adds the resulting resource to p.Resources.
-func (p *Parser) parseTheme(ctx context.Context, node *Node) error {
+func (p *Parser) parseTheme(node *Node) error {
 	tmp := &ThemeYAML{}
-	// TODO: get from defaults
-	if node.YAML != nil {
-		if err := node.YAML.Decode(tmp); err != nil {
-			return pathError{path: node.YAMLPath, err: newYAMLError(err)}
-		}
+	err := p.decodeNodeYAML(node, false, tmp)
+	if err != nil {
+		return err
 	}
 
-	// Parse the colors now to get the parse error before inserting resource
-	var pc csscolorparser.Color
-	hasPc := false
-	var sc csscolorparser.Color
-	hasSc := false
-	var err error
-	if tmp.Colors.Primary != "" {
-		pc, err = csscolorparser.Parse(tmp.Colors.Primary)
-		if err != nil {
-			return err
-		}
-		hasPc = true
-	}
-	if tmp.Colors.Secondary != "" {
-		sc, err = csscolorparser.Parse(tmp.Colors.Secondary)
-		if err != nil {
-			return err
-		}
-		hasSc = true
+	spec, err := p.parseThemeYAML(tmp)
+	if err != nil {
+		return err
 	}
 
 	r, err := p.insertResource(ResourceKindTheme, node.Name, node.Paths, node.Refs...)
@@ -52,14 +32,33 @@ func (p *Parser) parseTheme(ctx context.Context, node *Node) error {
 		return err
 	}
 
-	if hasPc {
-		r.ThemeSpec.PrimaryColor = toThemeColor(pc)
-	}
-	if hasSc {
-		r.ThemeSpec.SecondaryColor = toThemeColor(sc)
-	}
+	r.ThemeSpec = spec
 
 	return nil
+}
+
+func (p *Parser) parseThemeYAML(tmp *ThemeYAML) (*runtimev1.ThemeSpec, error) {
+	spec := &runtimev1.ThemeSpec{}
+
+	if tmp.Colors.Primary != "" {
+		pc, err := csscolorparser.Parse(tmp.Colors.Primary)
+		if err != nil {
+			return nil, err
+		}
+		spec.PrimaryColor = toThemeColor(pc)
+		spec.PrimaryColorRaw = tmp.Colors.Primary
+	}
+
+	if tmp.Colors.Secondary != "" {
+		sc, err := csscolorparser.Parse(tmp.Colors.Secondary)
+		if err != nil {
+			return nil, err
+		}
+		spec.SecondaryColor = toThemeColor(sc)
+		spec.SecondaryColorRaw = tmp.Colors.Secondary
+	}
+
+	return spec, nil
 }
 
 func toThemeColor(c csscolorparser.Color) *runtimev1.Color {

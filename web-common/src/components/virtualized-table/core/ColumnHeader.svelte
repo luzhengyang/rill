@@ -2,21 +2,23 @@
   import { DataTypeIcon } from "@rilldata/web-common/components/data-types";
   import ArrowDown from "@rilldata/web-common/components/icons/ArrowDown.svelte";
   import Pin from "@rilldata/web-common/components/icons/Pin.svelte";
-  import { notifications } from "@rilldata/web-common/components/notifications";
   import Shortcut from "@rilldata/web-common/components/tooltip/Shortcut.svelte";
   import StackingWord from "@rilldata/web-common/components/tooltip/StackingWord.svelte";
   import Tooltip from "@rilldata/web-common/components/tooltip/Tooltip.svelte";
   import TooltipContent from "@rilldata/web-common/components/tooltip/TooltipContent.svelte";
   import TooltipShortcutContainer from "@rilldata/web-common/components/tooltip/TooltipShortcutContainer.svelte";
   import TooltipTitle from "@rilldata/web-common/components/tooltip/TooltipTitle.svelte";
-  import { createShiftClickAction } from "@rilldata/web-common/lib/actions/shift-click-action";
+  import { SortDirection } from "@rilldata/web-common/features/dashboards/proto-state/derived-types";
+  import {
+    copyToClipboard,
+    isClipboardApiSupported,
+  } from "@rilldata/web-common/lib/actions/copy-to-clipboard";
   import { createEventDispatcher, getContext } from "svelte";
   import { fly } from "svelte/transition";
   import TooltipDescription from "../../tooltip/TooltipDescription.svelte";
+  import type { ResizeEvent } from "../drag-table-cell";
   import type { HeaderPosition, VirtualizedTableConfig } from "../types";
   import StickyHeader from "./StickyHeader.svelte";
-  import { SortDirection } from "@rilldata/web-common/features/dashboards/proto-state/derived-types";
-  import type { ResizeEvent } from "../drag-table-cell";
 
   export let pinned = false;
   export let noPin = false;
@@ -27,6 +29,7 @@
   export let header;
   export let position: HeaderPosition = "top";
   export let enableResize = true;
+  export let enableSorting = true;
   export let isSelected = false;
   export let highlight = false;
   export let sorted: SortDirection | undefined = undefined;
@@ -34,12 +37,11 @@
   const config: VirtualizedTableConfig = getContext("config");
   const dispatch = createEventDispatcher();
 
-  const { shiftClickAction } = createShiftClickAction();
-
   let showMore = false;
 
   $: isDimensionTable = config.table === "DimensionTable";
-  $: isDimensionColumn = isDimensionTable && type === "VARCHAR";
+  $: isDimensionColumn =
+    isDimensionTable && (type === "VARCHAR" || type === "CODE_STRING");
 
   $: textAlignment = isDimensionColumn ? "text-left pl-1" : "text-right pr-1";
 
@@ -72,18 +74,14 @@
   on:blur={() => {
     showMore = false;
   }}
-  on:click={() => {
+  onClick={() => {
     dispatch("click-column");
+  }}
+  onShiftClick={() => {
+    copyToClipboard(name, `copied column name "${name}" to clipboard`);
   }}
 >
   <div
-    use:shiftClickAction
-    on:shift-click={async () => {
-      await navigator.clipboard.writeText(name);
-      notifications.send({
-        message: `copied column name "${name}" to clipboard`,
-      });
-    }}
     class=" 
            flex
            justify-stretch
@@ -96,9 +94,8 @@
       <div
         class="
         grid
-        items-center cursor-pointer w-full
-        {isSelected ? '' : 'gap-x-2'}
-        "
+        items-center cursor-pointer w-full"
+        class:gap-x-2={!isSelected}
         style:grid-template-columns={isDimensionTable
           ? ""
           : `max-content auto ${!noPin && showMore ? "max-content" : ""}`}
@@ -139,19 +136,23 @@
             {description}
           </TooltipDescription>
         {/if}
-        <TooltipShortcutContainer>
-          {#if isDimensionTable}
-            <div>Sort column</div>
-            <Shortcut>Click</Shortcut>
-          {/if}
-          <div>
-            <StackingWord key="shift">Copy</StackingWord>
-            column name to clipboard
-          </div>
-          <Shortcut>
-            <span style="font-family: var(--system);">⇧</span> + Click
-          </Shortcut>
-        </TooltipShortcutContainer>
+        {#if isDimensionTable || isClipboardApiSupported()}
+          <TooltipShortcutContainer>
+            {#if enableSorting}
+              <div>Sort column</div>
+              <Shortcut>Click</Shortcut>
+            {/if}
+            {#if isClipboardApiSupported()}
+              <div>
+                <StackingWord key="shift">Copy</StackingWord>
+                column name to clipboard
+              </div>
+              <Shortcut>
+                <span style="font-family: var(--system);">⇧</span> + Click
+              </Shortcut>
+            {/if}
+          </TooltipShortcutContainer>
+        {/if}
       </TooltipContent>
     </Tooltip>
 
@@ -163,7 +164,7 @@
           </div>
         {:else if sorted === SortDirection.ASCENDING}
           <div in:fly|global={{ duration: 200, y: 8 }} style:opacity={1}>
-            <ArrowDown transform="scale(1 -1)" size="12px" />
+            <ArrowDown flip size="12px" />
           </div>
         {/if}
       </div>
@@ -197,6 +198,7 @@
     overflow: hidden;
     display: -webkit-box;
     -webkit-line-clamp: 2;
+    line-clamp: 2;
     -webkit-box-orient: vertical;
   }
 </style>

@@ -1,64 +1,78 @@
-import type {
-  V1ConnectorSpec,
-  V1ReconcileError,
+import { extractFileExtension } from "@rilldata/web-common/features/entity-management/file-path-utils";
+import {
+  ConnectorDriverPropertyType,
+  type V1ConnectorDriver,
+  type V1SourceV2,
 } from "@rilldata/web-common/runtime-client";
-import { extractFileExtension } from "./extract-table-name";
-import type { SourceConnectionType } from "../../metrics/service/SourceEventTypes";
-import { behaviourEvent, errorEvent } from "../../metrics/initMetrics";
-import type { BehaviourEventMedium } from "../../metrics/service/BehaviourEventTypes";
-import type {
-  MetricsEventScreenName,
-  MetricsEventSpace,
-} from "../../metrics/service/MetricsTypes";
-import { getFilePathFromNameAndType } from "../entity-management/entity-mappers";
-import { EntityType } from "../entity-management/types";
-import { sanitizeEntityName } from "./extract-table-name";
-import { categorizeSourceError } from "./modal/errors";
+import { makeDotEnvConnectorKey } from "../connectors/code-utils";
+import { sanitizeEntityName } from "../entity-management/name-utils";
 
-export function compileCreateSourceYAML(
-  values: Record<string, unknown>,
-  connectorName: string
+// Helper text that we put at the top of every Source YAML file
+const TOP_OF_FILE = `# Source YAML
+# Reference documentation: https://docs.rilldata.com/reference/project-files/sources
+
+type: source`;
+
+export function compileSourceYAML(
+  connector: V1ConnectorDriver,
+  formValues: Record<string, unknown>,
 ) {
-  const topLineComment = `# Visit https://docs.rilldata.com/reference/project-files/sources to learn more about Rill source files.`;
+  // Get the secret property keys
+  const secretPropertyKeys =
+    connector.sourceProperties
+      ?.filter((property) => property.secret)
+      .map((property) => property.key) || [];
 
-  switch (connectorName) {
-    case "s3":
-    case "gcs":
-    case "https":
-    case "azure":
-    case "local_file":
-      connectorName = "duckdb";
-      values.sql = buildDuckDbQuery(values.path as string);
-      delete values.path;
-      break;
-    case "sqlite":
-      connectorName = "duckdb";
-      values.sql = `SELECT * FROM sqlite_scan('${values.db as string}', '${
-        values.table as string
-      }');`;
-      delete values.db;
-      delete values.table;
-      break;
-    case "duckdb": {
-      const db = values.db as string;
-      if (db.startsWith("md:")) {
-        connectorName = "motherduck";
-        values.db = db.replace("md:", "");
+  // Get the string property keys
+  const stringPropertyKeys =
+    connector.sourceProperties
+      ?.filter(
+        (property) => property.type === ConnectorDriverPropertyType.TYPE_STRING,
+      )
+      .map((property) => property.key) || [];
+
+  // Compile key value pairs
+  const compiledKeyValues = Object.keys(formValues)
+    .filter((key) => formValues[key] !== undefined)
+    .filter((key) => key !== "name")
+    .map((key) => {
+      const value = formValues[key] as string;
+
+      const isSecretProperty = secretPropertyKeys.includes(key);
+      if (isSecretProperty) {
+        // In Source YAML, explictly referencing `.env` secrets is not yet supported
+        // For now, `.env` secrets are implicitly referenced
+        return;
+
+        return `${key}: "{{ .env.${makeDotEnvConnectorKey(
+          connector.name as string,
+          key,
+        )} }}"`;
       }
-      break;
-    }
-  }
 
-  const compiledKeyValues = Object.entries(values)
-    .filter(([key]) => key !== "sourceName")
-    .map(([key, value]) => `${key}: "${value}"`)
+      const isStringProperty = stringPropertyKeys.includes(key);
+      if (isStringProperty) {
+        return `${key}: "${value}"`;
+      }
+
+      return `${key}: ${value}`;
+    })
     .join("\n");
 
-  return `${topLineComment}\n\ntype: "${connectorName}"\n` + compiledKeyValues;
+  // Return the compiled YAML
+  return (
+    `${TOP_OF_FILE}\n\nconnector: "${connector.name}"\n` + compiledKeyValues
+  );
+}
+
+export function compileLocalFileSourceYAML(path: string) {
+  return `${TOP_OF_FILE}\n\nconnector: "duckdb"\nsql: "${buildDuckDbQuery(
+    path,
+  )}"`;
 }
 
 function buildDuckDbQuery(path: string): string {
-  const extension = extractFileExtension(path as string);
+  const extension = extractFileExtension(path);
   if (extensionContainsParts(extension, [".csv", ".tsv", ".txt"])) {
     return `select * from read_csv('${path}', auto_detect=true, ignore_errors=1, header=true)`;
   } else if (extensionContainsParts(extension, [".parquet"])) {
@@ -75,7 +89,7 @@ function buildDuckDbQuery(path: string): string {
  */
 function extensionContainsParts(
   fileExtension: string,
-  extensionParts: Array<string>
+  extensionParts: Array<string>,
 ) {
   for (const extension of extensionParts) {
     if (fileExtension.includes(extension)) return true;
@@ -83,7 +97,7 @@ function extensionContainsParts(
   return false;
 }
 
-export function inferSourceName(connector: V1ConnectorSpec, path: string) {
+export function inferSourceName(connector: V1ConnectorDriver, path: string) {
   if (
     !path ||
     path.endsWith("/") ||
@@ -122,49 +136,78 @@ export function getFileTypeFromPath(fileName) {
   return fileType;
 }
 
-export function getSourceError(errors: V1ReconcileError[], sourceName) {
-  const path = getFilePathFromNameAndType(sourceName, EntityType.Table);
+/**
+ * Convert applicable connectors to DuckDB. We do this to leverage DuckDB's native,
+ * well-documented file reading capabilities.
+ */
+export function maybeRewriteToDuckDb(
+  connector: V1ConnectorDriver,
+  formValues: Record<string, unknown>,
+): [V1ConnectorDriver, Record<string, unknown>] {
+  // Create a copy of the connector, so that we don't overwrite the original
+  const connectorCopy = { ...connector };
 
-  return errors?.find((error) => error?.filePath === path);
+  switch (connector.name) {
+    case "s3":
+    case "gcs":
+    case "https":
+    case "azure":
+    case "local_file":
+      connectorCopy.name = "duckdb";
+
+      formValues.sql = buildDuckDbQuery(formValues.path as string);
+      delete formValues.path;
+
+      connectorCopy.sourceProperties = [
+        {
+          key: "sql",
+          type: ConnectorDriverPropertyType.TYPE_STRING,
+        },
+      ];
+
+      break;
+    case "sqlite":
+      connectorCopy.name = "duckdb";
+
+      formValues.sql = `SELECT * FROM sqlite_scan('${formValues.db as string}', '${
+        formValues.table as string
+      }');`;
+      delete formValues.db;
+      delete formValues.table;
+
+      connectorCopy.sourceProperties = [
+        {
+          key: "sql",
+          type: ConnectorDriverPropertyType.TYPE_STRING,
+        },
+      ];
+
+      break;
+  }
+
+  return [connectorCopy, formValues];
 }
 
-export function emitSourceErrorTelemetry(
-  space: MetricsEventSpace,
-  screenName: MetricsEventScreenName,
-  errorMessage: string,
-  connectionType: SourceConnectionType,
-  fileName: string
-) {
-  const categorizedError = categorizeSourceError(errorMessage);
-  const fileType = getFileTypeFromPath(fileName);
-  const isGlob = fileName.includes("*");
-
-  errorEvent?.fireSourceErrorEvent(
-    space,
-    screenName,
-    categorizedError,
-    connectionType,
-    fileType,
-    isGlob
-  );
+export function getFileExtension(source: V1SourceV2): string {
+  const path = source?.spec?.properties?.path?.toLowerCase();
+  if (path?.includes(".csv")) return "CSV";
+  if (path?.includes(".parquet")) return "Parquet";
+  if (path?.includes(".json")) return "JSON";
+  if (path?.includes(".ndjson")) return "JSON";
+  return "";
 }
 
-export function emitSourceSuccessTelemetry(
-  space: MetricsEventSpace,
-  screenName: MetricsEventScreenName,
-  medium: BehaviourEventMedium,
-  connectionType: SourceConnectionType,
-  fileName: string
-) {
-  const fileType = getFileTypeFromPath(fileName);
-  const isGlob = fileName.includes("*");
-
-  behaviourEvent?.fireSourceSuccessEvent(
-    medium,
-    screenName,
-    space,
-    connectionType,
-    fileType,
-    isGlob
-  );
+export function formatConnectorType(source: V1SourceV2) {
+  switch (source?.spec?.sourceConnector) {
+    case "s3":
+      return "S3";
+    case "gcs":
+      return "GCS";
+    case "https":
+      return "http(s)";
+    case "local_file":
+      return "Local file";
+    default:
+      return source?.state?.connector ?? "";
+  }
 }

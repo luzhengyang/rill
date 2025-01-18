@@ -154,63 +154,62 @@ func (c *catalogCache) get(n *runtimev1.ResourceName, withDeleted, clone bool) (
 }
 
 // list returns a list of resources in the catalog.
+// It optionally supports filtering by kind, path, and soft-deleted status.
 // The returned list is not sorted.
 // The returned list is always safe to manipulate (e.g. sort/filter), but the resource pointers must not be edited unless clone=true.
 // Unlike other catalog functions, it is safe to call list concurrently with calls to get and flush (i.e. under a read lock).
-func (c *catalogCache) list(kind string, withDeleted, clone bool) ([]*runtimev1.Resource, error) {
-	if kind != "" {
-		n := len(c.resources[kind])
-		res := make([]*runtimev1.Resource, 0, n)
-		if withDeleted {
-			for _, r := range c.resources[kind] {
-				if clone {
-					r = c.clone(r)
-				}
-				res = append(res, r)
-			}
-		} else {
-			for _, r := range c.resources[kind] {
-				if r.Meta.DeletedOn == nil {
-					if clone {
-						r = c.clone(r)
-					}
-					res = append(res, r)
-				}
-			}
-		}
-
-		return res, nil
-	}
-
+func (c *catalogCache) list(kind, path string, withDeleted, clone bool) []*runtimev1.Resource {
+	// Estimate number of resources to list
 	n := 0
-	for _, rs := range c.resources {
-		n += len(rs)
-	}
-
-	res := make([]*runtimev1.Resource, 0, n)
-	if withDeleted {
+	if path != "" {
+		n = 1
+	} else if kind == "" {
 		for _, rs := range c.resources {
-			for _, r := range rs {
-				if clone {
-					r = c.clone(r)
-				}
-				res = append(res, r)
-			}
+			n += len(rs)
 		}
 	} else {
-		for _, rs := range c.resources {
-			for _, r := range rs {
-				if r.Meta.DeletedOn == nil {
-					if clone {
-						r = c.clone(r)
+		n = len(c.resources[kind])
+	}
+
+	// Alloc slice for resources
+	res := make([]*runtimev1.Resource, 0, n)
+
+	// Find resources matching the filters and append to slice
+	for k, rs := range c.resources {
+		// Skip if doesn't match kind filter
+		if kind != "" && k != kind {
+			continue
+		}
+
+		for _, r := range rs {
+			// Skip if doesn't match withDeleted filter
+			if !withDeleted && r.Meta.DeletedOn != nil {
+				continue
+			}
+
+			// Skip if doesn't match path filter
+			if path != "" {
+				found := false
+				for _, p := range r.Meta.FilePaths {
+					if p == path {
+						found = true
+						break
 					}
-					res = append(res, r)
+				}
+				if !found {
+					continue
 				}
 			}
+
+			// Append to res
+			if clone {
+				r = c.clone(r)
+			}
+			res = append(res, r)
 		}
 	}
 
-	return res, nil
+	return res
 }
 
 // create creates a resource in the catalog.
@@ -259,7 +258,7 @@ func (c *catalogCache) create(name *runtimev1.ResourceName, refs []*runtimev1.Re
 
 // rename renames a resource in the catalog and sets the r.Meta.RenamedFrom field.
 func (c *catalogCache) rename(name, newName *runtimev1.ResourceName) error {
-	r, err := c.get(name, false, false)
+	r, err := c.get(name, false, true)
 	if err != nil {
 		return err
 	}
@@ -279,7 +278,7 @@ func (c *catalogCache) rename(name, newName *runtimev1.ResourceName) error {
 
 // clearRenamedFrom clears the r.Meta.RenamedFrom field without bumping version numbers.
 func (c *catalogCache) clearRenamedFrom(name *runtimev1.ResourceName) error {
-	r, err := c.get(name, false, false)
+	r, err := c.get(name, false, true)
 	if err != nil {
 		return err
 	}
@@ -296,7 +295,7 @@ func (c *catalogCache) clearRenamedFrom(name *runtimev1.ResourceName) error {
 
 // updateMeta updates the meta fields of a resource.
 func (c *catalogCache) updateMeta(name *runtimev1.ResourceName, refs []*runtimev1.ResourceName, owner *runtimev1.ResourceName, paths []string) error {
-	r, err := c.get(name, false, false)
+	r, err := c.get(name, false, true)
 	if err != nil {
 		return err
 	}
@@ -316,11 +315,11 @@ func (c *catalogCache) updateMeta(name *runtimev1.ResourceName, refs []*runtimev
 // updateSpec updates the spec field of a resource.
 // It uses the spec from the passed resource and disregards its other fields.
 func (c *catalogCache) updateSpec(name *runtimev1.ResourceName, from *runtimev1.Resource) error {
-	r, err := c.get(name, false, false)
+	r, err := c.get(name, false, true)
 	if err != nil {
 		return err
 	}
-	// NOTE: No need to unlink/link because no indexed fields are edited.
+	c.unlink(r)
 	err = c.ctrl.reconciler(name.Kind).AssignSpec(from, r)
 	if err != nil {
 		return err
@@ -328,6 +327,7 @@ func (c *catalogCache) updateSpec(name *runtimev1.ResourceName, from *runtimev1.
 	r.Meta.Version++
 	r.Meta.SpecVersion++
 	r.Meta.SpecUpdatedOn = timestamppb.Now()
+	c.link(r)
 	c.dirty[nameStr(r.Meta.Name)] = r.Meta.Name
 	c.addEvent(r.Meta.Name, r, runtimev1.ResourceEvent_RESOURCE_EVENT_WRITE)
 	return nil
@@ -336,11 +336,11 @@ func (c *catalogCache) updateSpec(name *runtimev1.ResourceName, from *runtimev1.
 // updateState updates the state field of a resource.
 // It uses the state from the passed resource and disregards its other fields.
 func (c *catalogCache) updateState(name *runtimev1.ResourceName, from *runtimev1.Resource) error {
-	r, err := c.get(name, true, false)
+	r, err := c.get(name, true, true)
 	if err != nil {
 		return err
 	}
-	// NOTE: No need to unlink/link because no indexed fields are edited.
+	c.unlink(r)
 	err = c.ctrl.reconciler(name.Kind).AssignState(from, r)
 	if err != nil {
 		return err
@@ -348,6 +348,7 @@ func (c *catalogCache) updateState(name *runtimev1.ResourceName, from *runtimev1
 	r.Meta.Version++
 	r.Meta.StateVersion++
 	r.Meta.StateUpdatedOn = timestamppb.Now()
+	c.link(r)
 	c.dirty[nameStr(r.Meta.Name)] = r.Meta.Name
 	c.addEvent(r.Meta.Name, r, runtimev1.ResourceEvent_RESOURCE_EVENT_WRITE)
 	return nil
@@ -355,7 +356,7 @@ func (c *catalogCache) updateState(name *runtimev1.ResourceName, from *runtimev1
 
 // updateError updates the reconcile_error field of a resource.
 func (c *catalogCache) updateError(name *runtimev1.ResourceName, reconcileErr error) error {
-	r, err := c.get(name, true, false)
+	r, err := c.get(name, true, true)
 	if err != nil {
 		return err
 	}
@@ -367,11 +368,12 @@ func (c *catalogCache) updateError(name *runtimev1.ResourceName, reconcileErr er
 		// Since bumping the state version usually invalidates derived things, we don't want to do it redundantly.
 		return nil
 	}
-	// NOTE: No need to unlink/link because no indexed fields are edited.
+	c.unlink(r)
 	r.Meta.ReconcileError = errStr
 	r.Meta.Version++
 	r.Meta.StateVersion++
 	r.Meta.StateUpdatedOn = timestamppb.Now()
+	c.link(r)
 	c.dirty[nameStr(r.Meta.Name)] = r.Meta.Name
 	c.addEvent(r.Meta.Name, r, runtimev1.ResourceEvent_RESOURCE_EVENT_WRITE)
 	return nil
@@ -380,7 +382,7 @@ func (c *catalogCache) updateError(name *runtimev1.ResourceName, reconcileErr er
 // updateDeleted sets the deleted_on field of a resource (a soft delete).
 // Afterwards, the resource can still be accessed by passing withDeleted to the getters.
 func (c *catalogCache) updateDeleted(name *runtimev1.ResourceName) error {
-	r, err := c.get(name, false, false)
+	r, err := c.get(name, false, true)
 	if err != nil {
 		return err
 	}
@@ -398,16 +400,18 @@ func (c *catalogCache) updateDeleted(name *runtimev1.ResourceName) error {
 // updateStatus updates the ephemeral status fields on a resource.
 // The values of these fields are reset next time a catalog cache is created.
 func (c *catalogCache) updateStatus(name *runtimev1.ResourceName, status runtimev1.ReconcileStatus, reconcileOn time.Time) error {
-	r, err := c.get(name, true, false)
+	r, err := c.get(name, true, true)
 	if err != nil {
 		return err
 	}
+	c.unlink(r)
 	r.Meta.ReconcileStatus = status
 	if reconcileOn.IsZero() {
 		r.Meta.ReconcileOn = nil
 	} else {
 		r.Meta.ReconcileOn = timestamppb.New(reconcileOn)
 	}
+	c.link(r)
 	c.addEvent(r.Meta.Name, r, runtimev1.ResourceEvent_RESOURCE_EVENT_WRITE)
 	return nil
 }
@@ -538,6 +542,12 @@ func resourceFromDriver(r drivers.Resource) *runtimev1.Resource {
 	err := proto.Unmarshal(r.Data, res)
 	if err != nil {
 		panic(err)
+	}
+
+	// Reset resource name to the appropriate DB column values (enables migrations to change the kind and name.)
+	res.Meta.Name = &runtimev1.ResourceName{
+		Kind: r.Kind,
+		Name: r.Name,
 	}
 
 	// Reset ephemeral fields.

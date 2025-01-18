@@ -1,11 +1,12 @@
-import type { ScaleLinear, ScaleTime } from "d3-scale";
 import { bisector } from "d3-array";
-import { timeFormat } from "d3-time-format";
+import type { ScaleLinear, ScaleTime } from "d3-scale";
 import { area, curveLinear, curveStep, line } from "d3-shape";
+import { timeFormat } from "d3-time-format";
 import { getContext } from "svelte";
 import { derived, writable } from "svelte/store";
 import { contexts } from "./constants";
 import { curveStepExtended } from "./marks/curveStepExtended";
+import { ScaleType } from "./state";
 import type {
   GraphicScale,
   ScaleStore,
@@ -31,16 +32,6 @@ const curves = {
   curveStep,
   curveStepExtended,
 };
-
-export function pathIsDefined(yAccessor: string) {
-  return (d) => {
-    return !(
-      d[yAccessor] === undefined ||
-      isNaN(d[yAccessor]) ||
-      d[yAccessor] === null
-    );
-  };
-}
 
 export function pathDoesNotDropToZero(yAccessor: string) {
   return (d, i: number, arr) => {
@@ -91,7 +82,7 @@ interface LineGeneratorArguments {
   pathDefined?: (
     datum: object,
     i?: number,
-    arr?: ArrayLike<unknown>
+    arr?: ArrayLike<unknown>,
   ) => boolean;
 }
 
@@ -133,8 +124,9 @@ export function getTicks(
   xOrY: string,
   scale: GraphicScale,
   axisLength: number,
-  isDate: boolean
+  scaleType: ScaleType,
 ) {
+  const isDate = scaleType === ScaleType.DATE;
   const tickCount = Math.trunc(axisLength / (xOrY === "x" ? 100 : 50));
 
   let ticks = scale.ticks(tickCount);
@@ -161,7 +153,7 @@ export function barplotPolyline(
   Y,
   separator = 1,
   closeBottom = false,
-  inflator = 1
+  inflator = 1,
 ): string {
   if (!data?.length) return "";
   const path = data.reduce((pointsPathString, datum, i) => {
@@ -176,7 +168,7 @@ export function barplotPolyline(
 
     const computedHeight = Math.min(
       Y(0),
-      Y(0) * inflator - Y(count) * inflator
+      Y(0) * inflator - Y(count) * inflator,
     );
     const height = separator > 0 ? computedHeight : 0;
 
@@ -246,11 +238,11 @@ export function createAdaptiveLineThicknessStore(yAccessor) {
           }
           const max = Math.max(
             $yScale($data[i + 1][yAccessor]),
-            $yScale($data[i][yAccessor])
+            $yScale($data[i][yAccessor]),
           );
           const min = Math.min(
             $yScale($data[i + 1][yAccessor]),
-            $yScale($data[i][yAccessor])
+            $yScale($data[i][yAccessor]),
           );
           if (isNaN(min) || isNaN(max)) return 1 / $data.length;
           return Math.abs(max - min);
@@ -289,12 +281,12 @@ export function createAdaptiveLineThicknessStore(yAccessor) {
           // the y-ish distance travelled
           yIshDistanceTravelled,
           // the time series length / available X pixels
-          xIshDistanceTravellled
-        )
+          xIshDistanceTravellled,
+        ),
       );
 
       return value;
-    }
+    },
   );
 
   return {
@@ -307,24 +299,25 @@ export function createAdaptiveLineThicknessStore(yAccessor) {
 }
 
 // This is function equivalent of WithBisector
-export function bisectData(
+export function bisectData<T>(
   value: Date,
   direction: "left" | "right" | "center",
-  accessor: string,
-  data: ArrayLike<unknown>,
-  returnPos = false
-) {
-  if (!data?.length) return;
-  const bisect = bisector((d) => d[accessor])[direction];
+  accessor: keyof T,
+  data: ArrayLike<T>,
+): { position: number; entry: T } {
+  const bisect = bisector<T, unknown>((d) => d[accessor])[direction];
+  const position = bisect(data, value);
 
-  if (returnPos) return value !== undefined ? bisect(data, value) : undefined;
-  return value !== undefined ? data[bisect(data, value)] : undefined;
+  return {
+    position,
+    entry: data[position],
+  };
 }
 
 /** For a scale domain returns a formatter for axis label and super label */
 export function createTimeFormat(
   scaleDomain: [Date, Date],
-  numberOfValues: number
+  numberOfValues: number,
 ): [(d: Date) => string, ((d: Date) => string) | undefined] {
   const diff =
     Math.abs(scaleDomain[1]?.getTime() - scaleDomain[0]?.getTime()) / 1000;

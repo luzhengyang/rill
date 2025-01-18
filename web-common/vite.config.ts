@@ -1,16 +1,10 @@
-import { svelte } from "@sveltejs/vite-plugin-svelte";
-import { defineConfig, UserConfig } from "vitest/config";
+import { sveltekit } from "@sveltejs/kit/vite";
+import { defineConfig } from "vitest/config";
+import type { Alias } from "vite";
 
-type Writeable<T> = { -readonly [P in keyof T]: T[P] };
-type Alias = Writeable<UserConfig["resolve"]["alias"]>;
-
-const alias: Alias = [
+const alias: Alias[] = [
   {
     find: "src",
-    replacement: "/src",
-  },
-  {
-    find: "@rilldata/web-local",
     replacement: "/src",
   },
   {
@@ -38,13 +32,13 @@ export default defineConfig(({ mode }) => {
     resolve: {
       alias,
     },
-    plugins: [svelte()],
+    plugins: [sveltekit()],
     test: {
       // This alias fixes `onMount` not getting called during vitest unit tests.
       // See: https://stackoverflow.com/questions/76577665/vitest-and-svelte-components-onmount
       alias: [{ find: /^svelte$/, replacement: "svelte/internal" }],
       coverage: {
-        provider: "c8",
+        provider: "v8",
         src: ["./src"],
         all: true,
       },

@@ -2,157 +2,62 @@ package admin
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"path"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/hashicorp/go-version"
 	"github.com/rilldata/rill/admin/database"
 	"github.com/rilldata/rill/admin/provisioner"
 	runtimev1 "github.com/rilldata/rill/proto/gen/rill/runtime/v1"
 	"github.com/rilldata/rill/runtime/client"
 	"github.com/rilldata/rill/runtime/pkg/observability"
 	"github.com/rilldata/rill/runtime/server/auth"
-	"go.uber.org/multierr"
 	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
-type createDeploymentOptions struct {
-	ProjectID      string
-	Region         string
-	ProdBranch     string
-	ProdVariables  database.Variables
-	ProdOLAPDriver string
-	ProdOLAPDSN    string
-	ProdSlots      int
-	Annotations    deploymentAnnotations
+type CreateDeploymentOptions struct {
+	ProjectID   string
+	Annotations DeploymentAnnotations
+	Branch      string
+	Provisioner string
+	Slots       int
+	Version     string
+	Variables   map[string]string
+	OLAPDriver  string
+	OLAPDSN     string
 }
 
-func (s *Service) createDeployment(ctx context.Context, opts *createDeploymentOptions) (*database.Deployment, error) {
-	// We require a branch to be specified to create a deployment
-	if opts.ProdBranch == "" {
-		return nil, fmt.Errorf("cannot create project without a branch")
-	}
-
-	// Get a runtime with capacity for the deployment
-	alloc, err := s.Provisioner.Provision(ctx, &provisioner.ProvisionOptions{
-		OLAPDriver: opts.ProdOLAPDriver,
-		Slots:      opts.ProdSlots,
-		Region:     opts.Region,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	// Build instance config
-	instanceID := strings.ReplaceAll(uuid.New().String(), "-", "")
-	olapDriver := opts.ProdOLAPDriver
-	olapConfig := map[string]string{}
-	var embedCatalog bool
-	switch olapDriver {
-	case "duckdb":
-		if opts.ProdOLAPDSN != "" {
-			return nil, fmt.Errorf("passing a DSN is not allowed for driver 'duckdb'")
-		}
-		if opts.ProdSlots == 0 {
-			return nil, fmt.Errorf("slot count can't be 0 for driver 'duckdb'")
-		}
-
-		olapConfig["dsn"] = fmt.Sprintf("%s.db", path.Join(alloc.DataDir, instanceID))
-		olapConfig["cpu"] = strconv.Itoa(alloc.CPU)
-		olapConfig["memory_limit_gb"] = strconv.Itoa(alloc.MemoryGB)
-		olapConfig["storage_limit_bytes"] = strconv.FormatInt(alloc.StorageBytes, 10)
-		embedCatalog = false
-	case "duckdb-ext-storage": // duckdb driver having capability to store table as view
-		if opts.ProdOLAPDSN != "" {
-			return nil, fmt.Errorf("passing a DSN is not allowed for driver 'duckdb-ext-storage'")
-		}
-		if opts.ProdSlots == 0 {
-			return nil, fmt.Errorf("slot count can't be 0 for driver 'duckdb-ext-storage'")
-		}
-
-		olapDriver = "duckdb"
-		olapConfig["dsn"] = fmt.Sprintf("%s.db", path.Join(alloc.DataDir, instanceID, "main"))
-		olapConfig["cpu"] = strconv.Itoa(alloc.CPU)
-		olapConfig["memory_limit_gb"] = strconv.Itoa(alloc.MemoryGB)
-		olapConfig["storage_limit_bytes"] = strconv.FormatInt(alloc.StorageBytes, 10)
-		olapConfig["external_table_storage"] = strconv.FormatBool(true)
-		embedCatalog = false
-	default:
-		olapConfig["dsn"] = opts.ProdOLAPDSN
-		embedCatalog = false
-		olapConfig["storage_limit_bytes"] = "0"
-	}
-
-	modelDefaultMaterialize, err := defaultModelMaterialize(opts.ProdVariables)
-	if err != nil {
-		return nil, err
-	}
-
-	// Open a runtime client
-	rt, err := s.openRuntimeClient(alloc.Host, alloc.Audience)
-	if err != nil {
-		return nil, err
-	}
-	defer rt.Close()
-
+func (s *Service) CreateDeployment(ctx context.Context, opts *CreateDeploymentOptions) (*database.Deployment, error) {
 	// Create the deployment
 	depl, err := s.DB.InsertDeployment(ctx, &database.InsertDeploymentOptions{
 		ProjectID:         opts.ProjectID,
-		Branch:            opts.ProdBranch,
-		Slots:             opts.ProdSlots,
-		RuntimeHost:       alloc.Host,
-		RuntimeInstanceID: instanceID,
-		RuntimeAudience:   alloc.Audience,
+		Branch:            opts.Branch,
+		RuntimeHost:       "", // Will be populated after provisioning in createDeploymentInner
+		RuntimeInstanceID: "", // Will be populated after provisioning in createDeploymentInner
+		RuntimeAudience:   "", // Will be populated after provisioning in createDeploymentInner
 		Status:            database.DeploymentStatusPending,
+		StatusMessage:     "Provisioning...",
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	// Create an access token the deployment can use to authenticate with the admin server.
-	dat, err := s.IssueDeploymentAuthToken(ctx, depl.ID, nil)
+	// Initialize the deployment (by provisioning a runtime and creating an instance on it)
+	err = s.createDeploymentInner(ctx, depl, opts)
 	if err != nil {
-		err2 := s.DB.DeleteDeployment(ctx, depl.ID)
-		return nil, multierr.Combine(err, err2)
-	}
-	adminAuthToken := dat.Token().String()
-
-	// Create the instance
-	_, err = rt.CreateInstance(ctx, &runtimev1.CreateInstanceRequest{
-		InstanceId:     instanceID,
-		OlapConnector:  olapDriver,
-		RepoConnector:  "admin",
-		AdminConnector: "admin",
-		Connectors: []*runtimev1.Connector{
-			{
-				Name:   olapDriver,
-				Type:   olapDriver,
-				Config: olapConfig,
-			},
-			{
-				Name: "admin",
-				Type: "admin",
-				Config: map[string]string{
-					"admin_url":    s.opts.ExternalURL,
-					"access_token": adminAuthToken,
-					"project_id":   opts.ProjectID,
-					"branch":       opts.ProdBranch,
-					"nonce":        time.Now().Format(time.RFC3339Nano), // Only set for consistency with updateDeployment
-				},
-			},
-		},
-		Variables:               opts.ProdVariables,
-		Annotations:             opts.Annotations.toMap(),
-		EmbedCatalog:            embedCatalog,
-		StageChanges:            true,
-		ModelDefaultMaterialize: modelDefaultMaterialize,
-	})
-	if err != nil {
-		err2 := s.DB.DeleteDeployment(ctx, depl.ID)
-		return nil, multierr.Combine(err, err2)
+		// Mark deployment error
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		_, err2 := s.DB.UpdateDeploymentStatus(ctx, depl.ID, database.DeploymentStatusError, fmt.Sprintf("Failed to provision runtime: %v", err))
+		s.Logger.Error("create deployment: failed to provision runtime", zap.String("project_id", opts.ProjectID), zap.String("deployment_id", depl.ID), zap.Error(err), observability.ZapCtx(ctx))
+		// TODO: The validate_deployments job will tear it down, but we should consider starting a background job to do so immediately.
+		return nil, errors.Join(err, err2)
 	}
 
 	// Mark deployment ready
@@ -165,38 +70,193 @@ func (s *Service) createDeployment(ctx context.Context, opts *createDeploymentOp
 	return depl, nil
 }
 
-type updateDeploymentOptions struct {
-	Branch          string
-	Variables       map[string]string
-	Annotations     deploymentAnnotations
-	EvictCachedRepo bool // Set to true if config returned by GetRepoMeta has changed such that the runtime should do a fresh clone instead of a pull.
-}
-
-func (s *Service) updateDeployment(ctx context.Context, depl *database.Deployment, opts *updateDeploymentOptions) error {
-	if opts.Branch == "" {
-		return fmt.Errorf("cannot update deployment without specifying a valid branch")
+// createDeploymentInner provisions a runtime and initializes an instance on it.
+// The implementation is idempotent, enabling it to be moved to a retryable background job in the future.
+func (s *Service) createDeploymentInner(ctx context.Context, d *database.Deployment, opts *CreateDeploymentOptions) error {
+	// Validate the desired runtime version.
+	// This is usually "latest", which the provisioner internally may resolve to an actual version.
+	runtimeVersion := opts.Version
+	err := validateRuntimeVersion(runtimeVersion)
+	if err != nil {
+		return err
 	}
 
-	var modelDefaultMaterialize *bool
-	if opts.Variables != nil { // if variables are nil, it means they were not changed
-		val, err := defaultModelMaterialize(opts.Variables)
-		if err != nil {
-			return err
-		}
-		modelDefaultMaterialize = &val
+	// Provision the runtime
+	r, err := s.provisionRuntime(ctx, &provisionRuntimeOptions{
+		DeploymentID: d.ID,
+		Provisioner:  opts.Provisioner,
+		Slots:        opts.Slots,
+		Version:      runtimeVersion,
+		Annotations:  opts.Annotations.ToMap(),
+	})
+	if err != nil {
+		return err
+	}
+	cfg, err := provisioner.NewRuntimeConfig(r.Config)
+	if err != nil {
+		return err
 	}
 
-	rt, err := s.openRuntimeClientForDeployment(depl)
+	// Update the deployment with the runtime details
+	instanceID := strings.ReplaceAll(r.ID, "-", "") // Use the provisioned resource ID without dashes as the instance ID
+	d, err = s.DB.UpdateDeployment(ctx, d.ID, &database.UpdateDeploymentOptions{
+		Branch:            d.Branch,
+		RuntimeHost:       cfg.Host,
+		RuntimeInstanceID: instanceID,
+		RuntimeAudience:   cfg.Audience,
+		Status:            database.DeploymentStatusPending,
+		StatusMessage:     "Creating instance...",
+	})
+	if err != nil {
+		return err
+	}
+
+	// Connect to the runtime
+	rt, err := s.OpenRuntimeClient(d)
 	if err != nil {
 		return err
 	}
 	defer rt.Close()
 
-	res, err := rt.GetInstance(ctx, &runtimev1.GetInstanceRequest{InstanceId: depl.RuntimeInstanceID})
+	// If the instance already exists, we can return now. (This can happen since this operation is idempotent and may be retried.)
+	_, err = rt.GetInstance(ctx, &runtimev1.GetInstanceRequest{InstanceId: instanceID})
+	if err != nil && status.Code(err) != codes.NotFound {
+		return err
+	}
+	if err == nil {
+		// Instance already exists. We can return.
+		return nil
+	}
+
+	// Create an access token that it can use to authenticate with the admin server.
+	dat, err := s.IssueDeploymentAuthToken(ctx, d.ID, nil)
 	if err != nil {
 		return err
 	}
 
+	// Prepare connectors
+	connectors := []*runtimev1.Connector{
+		// The admin connector
+		{
+			Name: "admin",
+			Type: "admin",
+			Config: map[string]string{
+				"admin_url":    s.opts.ExternalURL,
+				"access_token": dat.Token().String(),
+				"project_id":   opts.ProjectID,
+				"branch":       opts.Branch,
+				"nonce":        time.Now().Format(time.RFC3339Nano), // Only set for consistency with updateDeployment
+			},
+		},
+		// Always configure a DuckDB connector, even if it's not set as the default OLAP connector
+		{
+			Name: "duckdb",
+			Type: "duckdb",
+			Config: map[string]string{
+				"cpu":                 strconv.Itoa(cfg.CPU),
+				"memory_limit_gb":     strconv.Itoa(cfg.MemoryGB),
+				"storage_limit_bytes": strconv.FormatInt(cfg.StorageBytes, 10),
+			},
+		},
+	}
+
+	// Determine the default OLAP connector.
+	// TODO: Remove this because it is deprecated and can now be configured directly using `rill.yaml` and `rill env`.
+	var olapConnector string
+	switch opts.OLAPDriver {
+	case "duckdb", "duckdb-ext-storage":
+		if opts.Slots == 0 {
+			return fmt.Errorf("slot count can't be 0 for OLAP driver 'duckdb'")
+		}
+		olapConnector = "duckdb"
+		// Already configured DuckDB above
+	default:
+		olapConnector = opts.OLAPDriver
+		connectors = append(connectors, &runtimev1.Connector{
+			Name: opts.OLAPDriver,
+			Type: opts.OLAPDriver,
+			Config: map[string]string{
+				"dsn": opts.OLAPDSN,
+			},
+		})
+	}
+
+	// Create the instance
+	_, err = rt.CreateInstance(ctx, &runtimev1.CreateInstanceRequest{
+		InstanceId:     instanceID,
+		Environment:    "prod",
+		OlapConnector:  olapConnector,
+		RepoConnector:  "admin",
+		AdminConnector: "admin",
+		AiConnector:    "admin",
+		Connectors:     connectors,
+		Variables:      opts.Variables,
+		Annotations:    opts.Annotations.ToMap(),
+		EmbedCatalog:   false,
+	})
+	if err != nil {
+		return err
+	}
+
+	// Deployment is ready to use
+	return nil
+}
+
+type UpdateDeploymentOptions struct {
+	Annotations     DeploymentAnnotations
+	Branch          string
+	Version         string
+	Variables       map[string]string // If empty, the existing variables are left unchanged.
+	EvictCachedRepo bool              // Set to true to force the runtime to do a fresh repo clone instead of a pull.
+}
+
+func (s *Service) UpdateDeployment(ctx context.Context, d *database.Deployment, opts *UpdateDeploymentOptions) error {
+	// Validate the desired runtime version.
+	// This is usually "latest", which the provisioner internally may resolve to an actual version.
+	runtimeVersion := opts.Version
+	err := validateRuntimeVersion(runtimeVersion)
+	if err != nil {
+		return err
+	}
+
+	// Find the runtime provisioned for this deployment
+	pr, ok, err := s.findProvisionedRuntimeResource(ctx, d.ID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("can't update deployment %q because its runtime has not been initialized yet", d.ID)
+	}
+	args, err := provisioner.NewRuntimeArgs(pr.Args)
+	if err != nil {
+		return err
+	}
+
+	// Provision the runtime. This is idempotent and will (partially) update the existing provisioned runtime if the config has changed.
+	_, err = s.provisionRuntime(ctx, &provisionRuntimeOptions{
+		DeploymentID: d.ID,
+		Provisioner:  pr.Provisioner,
+		Slots:        args.Slots,
+		Version:      runtimeVersion,
+		Annotations:  opts.Annotations.ToMap(),
+	})
+	if err != nil {
+		return err
+	}
+
+	// Connect to the runtime, and update the instance's connectors/variables/annotations.
+	rt, err := s.OpenRuntimeClient(d)
+	if err != nil {
+		return err
+	}
+	defer rt.Close()
+	res, err := rt.GetInstance(ctx, &runtimev1.GetInstanceRequest{
+		InstanceId: d.RuntimeInstanceID,
+		Sensitive:  true,
+	})
+	if err != nil {
+		return err
+	}
 	connectors := res.Instance.Connectors
 	for _, c := range connectors {
 		if c.Name == "admin" {
@@ -211,91 +271,74 @@ func (s *Service) updateDeployment(ctx context.Context, depl *database.Deploymen
 			}
 		}
 	}
-
 	_, err = rt.EditInstance(ctx, &runtimev1.EditInstanceRequest{
-		InstanceId:              depl.RuntimeInstanceID,
-		Connectors:              connectors,
-		Annotations:             opts.Annotations.toMap(),
-		Variables:               opts.Variables,
-		ModelDefaultMaterialize: modelDefaultMaterialize,
+		InstanceId:  d.RuntimeInstanceID,
+		Connectors:  connectors,
+		Variables:   opts.Variables,
+		Annotations: opts.Annotations.ToMap(),
 	})
 	if err != nil {
 		return err
 	}
 
-	// Branch is the only property that's persisted on the Deployment
-	if opts.Branch != depl.Branch {
-		newDepl, err := s.DB.UpdateDeploymentBranch(ctx, depl.ID, opts.Branch)
-		if err != nil {
-			// TODO: Handle inconsistent state (instance updated successfully, but deployment did not update)
-			return err
-		}
-		depl.Branch = opts.Branch
-		depl.UpdatedOn = newDepl.UpdatedOn
+	// Write the changed branch and status to the persisted deployment.
+	_, err = s.DB.UpdateDeployment(ctx, d.ID, &database.UpdateDeploymentOptions{
+		Branch:            opts.Branch,
+		RuntimeHost:       d.RuntimeHost,
+		RuntimeInstanceID: d.RuntimeInstanceID,
+		RuntimeAudience:   d.RuntimeAudience,
+		Status:            database.DeploymentStatusOK,
+		StatusMessage:     "",
+	})
+	if err != nil {
+		return err
 	}
 
 	return nil
 }
 
-// HibernateDeployments tears down unused deployments
-func (s *Service) HibernateDeployments(ctx context.Context) error {
-	depls, err := s.DB.FindExpiredDeployments(ctx)
+func (s *Service) TeardownDeployment(ctx context.Context, depl *database.Deployment) error {
+	// Connect to the deployment's runtime and delete the instance
+	rt, err := s.OpenRuntimeClient(depl)
 	if err != nil {
-		return err
-	}
-
-	if len(depls) == 0 {
-		return nil
-	}
-
-	s.Logger.Info("hibernate: starting", zap.Int("deployments", len(depls)))
-
-	for _, depl := range depls {
-		proj, err := s.DB.FindProject(ctx, depl.ProjectID)
-		if err != nil {
-			s.Logger.Error("hibernate: find project error", zap.String("project_id", proj.ID), zap.String("deployment_id", depl.ID), zap.Error(err), observability.ZapCtx(ctx))
-			continue
-		}
-
-		s.Logger.Info("hibernate: deleting deployment", zap.String("project_id", proj.ID), zap.String("deployment_id", depl.ID))
-
-		err = s.teardownDeployment(ctx, proj, depl)
-		if err != nil {
-			s.Logger.Error("hibernate: teardown deployment error", zap.String("project_id", proj.ID), zap.String("deployment_id", depl.ID), zap.Error(err), observability.ZapCtx(ctx))
-			continue
-		}
-
-		// Update prod deployment on project
-		_, err = s.DB.UpdateProject(ctx, proj.ID, &database.UpdateProjectOptions{
-			Name:                 proj.Name,
-			Description:          proj.Description,
-			Public:               proj.Public,
-			GithubURL:            proj.GithubURL,
-			GithubInstallationID: proj.GithubInstallationID,
-			ProdBranch:           proj.ProdBranch,
-			ProdVariables:        proj.ProdVariables,
-			ProdSlots:            proj.ProdSlots,
-			Region:               proj.Region,
-			ProdTTLSeconds:       proj.ProdTTLSeconds,
-			ProdDeploymentID:     nil,
+		s.Logger.Error("failed to open runtime client", zap.String("deployment_id", depl.ID), zap.String("runtime_instance_id", depl.RuntimeInstanceID), zap.Error(err), observability.ZapCtx(ctx))
+	} else {
+		defer rt.Close()
+		_, err = rt.DeleteInstance(ctx, &runtimev1.DeleteInstanceRequest{
+			InstanceId: depl.RuntimeInstanceID,
 		})
 		if err != nil {
-			return err
+			s.Logger.Error("failed to delete instance", zap.String("deployment_id", depl.ID), zap.String("runtime_instance_id", depl.RuntimeInstanceID), zap.Error(err), observability.ZapCtx(ctx))
 		}
 	}
 
-	s.Logger.Info("hibernate: completed", zap.Int("deployments", len(depls)))
-
-	return nil
-}
-
-func (s *Service) teardownDeployment(ctx context.Context, proj *database.Project, depl *database.Deployment) error {
-	// Connect to the deployment's runtime
-	rt, err := s.openRuntimeClientForDeployment(depl)
+	// Delete all provisioned resources for the deployment
+	prs, err := s.DB.FindProvisionerResourcesForDeployment(ctx, depl.ID)
 	if err != nil {
-		return err
+		s.Logger.Error("failed to find provisioner resources for deployment", zap.String("deployment_id", depl.ID), zap.Error(err), observability.ZapCtx(ctx))
+	} else {
+		for _, pr := range prs {
+			p, ok := s.ProvisionerSet[pr.Provisioner]
+			if !ok {
+				s.Logger.Warn("provisioner: deprovisioning skipped, provisioner not found", zap.String("deployment_id", depl.ID), zap.String("provisioner", pr.Provisioner), zap.String("provision_id", pr.ID), observability.ZapCtx(ctx))
+			} else {
+				err = p.Deprovision(ctx, &provisioner.Resource{
+					ID:     pr.ID,
+					Type:   provisioner.ResourceType(pr.Type),
+					State:  pr.State,
+					Config: pr.Config,
+				})
+				if err != nil {
+					s.Logger.Error("provisioner: failed to deprovision", zap.String("deployment_id", depl.ID), zap.String("provisioner", pr.Provisioner), zap.String("provision_id", pr.ID), zap.Error(err), observability.ZapCtx(ctx))
+				}
+			}
+
+			err = s.DB.DeleteProvisionerResource(ctx, pr.ID)
+			if err != nil {
+				s.Logger.Error("failed to delete provisioner resource", zap.String("deployment_id", depl.ID), zap.String("provisioner_resource_id", pr.ID), zap.Error(err), observability.ZapCtx(ctx))
+			}
+		}
 	}
-	defer rt.Close()
 
 	// Delete the deployment
 	err = s.DB.DeleteDeployment(ctx, depl.ID)
@@ -303,10 +346,56 @@ func (s *Service) teardownDeployment(ctx context.Context, proj *database.Project
 		return err
 	}
 
-	// Delete the instance
-	_, err = rt.DeleteInstance(ctx, &runtimev1.DeleteInstanceRequest{
-		InstanceId: depl.RuntimeInstanceID,
-		DropDb:     strings.Contains(proj.ProdOLAPDriver, "duckdb"), // Only drop DB if it's DuckDB
+	return nil
+}
+
+func (s *Service) CheckProvisionerResource(ctx context.Context, pr *database.ProvisionerResource, annotations DeploymentAnnotations) error {
+	// Find the provisioner
+	p, ok := s.ProvisionerSet[pr.Provisioner]
+	if !ok {
+		return fmt.Errorf("provisioner: %q is not in the provisioner set", pr.Provisioner)
+	}
+
+	// Run a check
+	r := &provisioner.Resource{
+		ID:     pr.ID,
+		Type:   provisioner.ResourceType(pr.Type),
+		State:  pr.State,
+		Config: pr.Config,
+	}
+	r, err := p.CheckResource(ctx, r, &provisioner.ResourceOptions{
+		Args:        pr.Args,
+		Annotations: annotations.ToMap(),
+		RillVersion: s.resolveRillVersion(),
+	})
+	if err != nil {
+		// For cancellations, we exit early without updating the status in the DB
+		if errors.Is(err, ctx.Err()) {
+			return err
+		}
+
+		// Set the status as errored
+		_, err2 := s.DB.UpdateProvisionerResource(ctx, pr.ID, &database.UpdateProvisionerResourceOptions{
+			Status:        database.ProvisionerResourceStatusError,
+			StatusMessage: fmt.Sprintf("check failed: %s", err.Error()),
+			Args:          pr.Args,
+			State:         pr.State,
+			Config:        pr.Config,
+		})
+		if err2 != nil {
+			return errors.Join(err, err2)
+		}
+
+		return err
+	}
+
+	// The returned resource's state may have been updated, so we update the database accordingly.
+	_, err = s.DB.UpdateProvisionerResource(ctx, pr.ID, &database.UpdateProvisionerResourceOptions{
+		Status:        database.ProvisionerResourceStatusOK,
+		StatusMessage: "",
+		Args:          pr.Args,
+		State:         r.State,
+		Config:        r.Config,
 	})
 	if err != nil {
 		return err
@@ -315,21 +404,13 @@ func (s *Service) teardownDeployment(ctx context.Context, proj *database.Project
 	return nil
 }
 
-func (s *Service) openRuntimeClientForDeployment(d *database.Deployment) (*client.Client, error) {
-	return s.openRuntimeClient(d.RuntimeHost, d.RuntimeAudience)
-}
-
-func (s *Service) openRuntimeClient(host, audience string) (*client.Client, error) {
-	jwt, err := s.issuer.NewToken(auth.TokenOptions{
-		AudienceURL:       audience,
-		TTL:               time.Hour,
-		SystemPermissions: []auth.Permission{auth.ManageInstances, auth.ReadInstance, auth.EditInstance, auth.ReadObjects},
-	})
+func (s *Service) OpenRuntimeClient(depl *database.Deployment) (*client.Client, error) {
+	jwt, err := s.IssueRuntimeManagementToken(depl.RuntimeAudience)
 	if err != nil {
 		return nil, err
 	}
 
-	rt, err := client.New(host, jwt)
+	rt, err := client.New(depl.RuntimeHost, jwt)
 	if err != nil {
 		return nil, err
 	}
@@ -337,48 +418,128 @@ func (s *Service) openRuntimeClient(host, audience string) (*client.Client, erro
 	return rt, nil
 }
 
-type deploymentAnnotations struct {
-	orgID    string
-	orgName  string
-	projID   string
-	projName string
-}
-
-func newDeploymentAnnotations(org *database.Organization, proj *database.Project) deploymentAnnotations {
-	return deploymentAnnotations{
-		orgID:    org.ID,
-		orgName:  org.Name,
-		projID:   proj.ID,
-		projName: proj.Name,
-	}
-}
-
-func (da *deploymentAnnotations) toMap() map[string]string {
-	return map[string]string{
-		"organization_id":   da.orgID,
-		"organization_name": da.orgName,
-		"project_id":        da.projID,
-		"project_name":      da.projName,
-	}
-}
-
-func defaultModelMaterialize(vars map[string]string) (bool, error) {
-	// Temporary hack to enable configuring ModelDefaultMaterialize using a variable.
-	// Remove when we have a way to conditionally configure it using code files.
-
-	if vars == nil {
-		return false, nil
-	}
-
-	s, ok := vars["__materialize_default"]
-	if !ok {
-		return false, nil
-	}
-
-	val, err := strconv.ParseBool(s)
+func (s *Service) IssueRuntimeManagementToken(aud string) (string, error) {
+	jwt, err := s.issuer.NewToken(auth.TokenOptions{
+		AudienceURL:       aud,
+		Subject:           "admin-service",
+		TTL:               time.Hour,
+		SystemPermissions: []auth.Permission{auth.ManageInstances, auth.ReadInstance, auth.EditInstance, auth.EditTrigger, auth.ReadObjects},
+	})
 	if err != nil {
-		return false, fmt.Errorf("invalid __materialize_default value %q: %w", s, err)
+		return "", err
 	}
 
-	return val, nil
+	return jwt, nil
+}
+
+func (s *Service) NewDeploymentAnnotations(org *database.Organization, proj *database.Project) DeploymentAnnotations {
+	return DeploymentAnnotations{
+		orgID:           org.ID,
+		orgName:         org.Name,
+		projID:          proj.ID,
+		projName:        proj.Name,
+		projProdSlots:   fmt.Sprint(proj.ProdSlots),
+		projProvisioner: proj.Provisioner,
+		projAnnotations: proj.Annotations,
+	}
+}
+
+type DeploymentAnnotations struct {
+	orgID           string
+	orgName         string
+	projID          string
+	projName        string
+	projProdSlots   string
+	projProvisioner string
+	projAnnotations map[string]string
+}
+
+func (da *DeploymentAnnotations) ToMap() map[string]string {
+	res := make(map[string]string, len(da.projAnnotations)+4)
+	for k, v := range da.projAnnotations {
+		res[k] = v
+	}
+	res["organization_id"] = da.orgID
+	res["organization_name"] = da.orgName
+	res["project_id"] = da.projID
+	res["project_name"] = da.projName
+	res["project_prod_slots"] = da.projProdSlots
+	res["project_provisioner"] = da.projProvisioner
+	return res
+}
+
+type provisionRuntimeOptions struct {
+	DeploymentID string
+	Provisioner  string
+	Slots        int
+	Version      string
+	Annotations  map[string]string
+}
+
+func (s *Service) provisionRuntime(ctx context.Context, opts *provisionRuntimeOptions) (*database.ProvisionerResource, error) {
+	// Use default if no provisioner is specified.
+	if opts.Provisioner == "" {
+		opts.Provisioner = s.opts.DefaultProvisioner
+	}
+
+	// Create provisioner args
+	args := &provisioner.RuntimeArgs{
+		Slots:   opts.Slots,
+		Version: opts.Version,
+	}
+
+	// Call into the generic provision function
+	pr, err := s.Provision(ctx, &ProvisionOptions{
+		DeploymentID: opts.DeploymentID,
+		Type:         provisioner.ResourceTypeRuntime,
+		Name:         "", // Not giving runtime resources a name since there should only be one per deployment.
+		Provisioner:  opts.Provisioner,
+		Args:         args.AsMap(),
+		Annotations:  opts.Annotations,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return pr, nil
+}
+
+func (s *Service) findProvisionedRuntimeResource(ctx context.Context, deploymentID string) (*database.ProvisionerResource, bool, error) {
+	pr, err := s.DB.FindProvisionerResourceByTypeAndName(ctx, deploymentID, string(provisioner.ResourceTypeRuntime), "")
+	if err != nil {
+		if errors.Is(err, database.ErrNotFound) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return pr, true, nil
+}
+
+func (s *Service) resolveRillVersion() string {
+	if s.VersionNumber != "" {
+		return s.VersionNumber
+	}
+	if s.VersionCommit != "" {
+		return s.VersionCommit
+	}
+	return "latest"
+}
+
+func validateRuntimeVersion(ver string) error {
+	// Verify version is a valid SemVer, a full Git commit hash or 'latest'
+	if ver != "latest" {
+		_, err := version.NewVersion(ver)
+		if err != nil {
+			// Not a valid SemVer, try as a full commit hash
+			matched, err := regexp.MatchString(`\b([a-f0-9]{40})\b`, ver)
+			if err != nil {
+				return err
+			}
+			if !matched {
+				return fmt.Errorf("not a valid version %q", ver)
+			}
+		}
+	}
+
+	return nil
 }

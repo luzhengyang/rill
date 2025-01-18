@@ -1,20 +1,24 @@
 import {
-  Formatter,
-  FormatterOptionsCommon,
-  FormatterRangeSpecsStrategy,
+  type Formatter,
+  type FormatterOptionsCommon,
+  type FormatterRangeSpecsStrategy,
   NumberKind,
-  NumberParts,
-  RangeFormatSpec,
+  type NumberParts,
+  type RangeFormatSpec,
 } from "../humanizer-types";
 import { countDigits, countNonZeroDigits } from "../utils/count-digits";
 import {
   formatNumWithOrderOfMag,
+  orderOfMagnitude,
   orderOfMagnitudeEng,
 } from "../utils/format-with-order-of-magnitude";
 import { numberPartsToString } from "../utils/number-parts-utils";
 import { shortScaleSuffixIfAvailableForStr } from "../utils/short-scale-suffixes";
 
 const formatWithRangeSpec = (x: number, spec: RangeFormatSpec): NumberParts => {
+  if (spec.overrideValue !== undefined) {
+    return spec.overrideValue;
+  }
   const baseMag = spec.baseMagnitude ?? orderOfMagnitudeEng(spec.minMag);
   const padWithInsignificantZeros =
     spec.padWithInsignificantZeros === undefined
@@ -27,13 +31,13 @@ const formatWithRangeSpec = (x: number, spec: RangeFormatSpec): NumberParts => {
     baseMag,
     spec.maxDigitsRight,
     padWithInsignificantZeros,
-    useTrailingDot
+    useTrailingDot,
   );
 };
 
 const numberPartsValidForRangeSpec = (
   parts: NumberParts,
-  spec: RangeFormatSpec
+  spec: RangeFormatSpec,
 ): boolean => {
   const maxDigitsLeft = spec.maxDigitsLeft ?? 3;
   return (
@@ -52,30 +56,19 @@ export class PerRangeFormatter implements Formatter {
   options: FormatterOptionsCommon & FormatterRangeSpecsStrategy;
   initialSample: number[];
 
-  // FIXME: we can add this back in if we want to implement
-  // alignment. If we decide that we don't want to pursue that,
-  // we can remove this commented code
-  // largestPossibleNumberStringParts: NumberParts;
-  // maxPxWidthsSampledSoFar: FormatterWidths;
-  // maxCharWidthsSampledSoFar: FormatterWidths;
-  // largestPossibleNumberStringParts: NumberParts;
-
-  constructor(
-    sample: number[],
-    options: FormatterRangeSpecsStrategy & FormatterOptionsCommon
-  ) {
+  constructor(options: FormatterRangeSpecsStrategy & FormatterOptionsCommon) {
     this.options = options;
 
     // sort ranges from small to large by lower bound
     this.options.rangeSpecs = this.options.rangeSpecs.sort(
-      (a, b) => a.minMag - b.minMag
+      (a, b) => a.minMag - b.minMag,
     );
 
     // Throw an error if any of the ranges do not have min<sup
     this.options.rangeSpecs.forEach((r) => {
       if (r.minMag >= r.supMag) {
         throw new Error(
-          `invalid range: min ${r.minMag} is not strictly less than sup ${r.supMag}`
+          `invalid range: min ${r.minMag} is not strictly less than sup ${r.supMag}`,
         );
       }
     });
@@ -86,7 +79,7 @@ export class PerRangeFormatter implements Formatter {
       const range2 = this.options.rangeSpecs[i + 1];
       if (range1.supMag > range2.minMag) {
         throw new Error(
-          `Ranges must not overlap. range 1 sup = ${range1.supMag} is greater than range 2 min = ${range2.minMag}`
+          `Ranges must not overlap. range 1 sup = ${range1.supMag} is greater than range 2 min = ${range2.minMag}`,
         );
       }
     }
@@ -97,11 +90,10 @@ export class PerRangeFormatter implements Formatter {
       const range2 = this.options.rangeSpecs[i + 1];
       if (range1.supMag !== range2.minMag) {
         throw new Error(
-          `Gaps are not allowed between formatter ranges: range 1 sup = ${range1.supMag} is not equal to range 2 min = ${range2.minMag}`
+          `Gaps are not allowed between formatter ranges: range 1 sup = ${range1.supMag} is not equal to range 2 min = ${range2.minMag}`,
         );
       }
     }
-    this.initialSample = sample;
   }
 
   stringFormat(x: number): string {
@@ -115,7 +107,7 @@ export class PerRangeFormatter implements Formatter {
 
     if (isPercent) x = 100 * x;
 
-    let numParts: NumberParts;
+    let numParts: NumberParts | undefined = undefined;
 
     if (x === 0) {
       numParts = { int: "0", dot: "", frac: "", suffix: "" };
@@ -128,6 +120,13 @@ export class PerRangeFormatter implements Formatter {
       // formatted number.
       for (let i = 0; i < rangeSpecs.length; i++) {
         const spec = rangeSpecs[i];
+        if (spec.overrideValue !== undefined) {
+          const OoM = orderOfMagnitude(x);
+          if (OoM >= spec.minMag && OoM < spec.supMag) {
+            numParts = spec.overrideValue;
+            break;
+          }
+        }
         numParts = formatWithRangeSpec(x, spec);
         if (
           numberPartsValidForRangeSpec(numParts, spec) &&
@@ -149,17 +148,23 @@ export class PerRangeFormatter implements Formatter {
     // use defaults
     if (numParts === undefined) {
       const magE = orderOfMagnitudeEng(x);
+      const hasSmallFraction = magE <= -3;
+
+      const maxDigitsLeft = hasSmallFraction ? 1 : 3;
       numParts = formatNumWithOrderOfMag(x, magE, defaultMaxDigitsRight, true);
-      // Note that if this attempt at formatting results in more than 3
-      // digits left of the decimal point, then we must format this
-      // number according to the next magnitude up.
-      if (countDigits(numParts.int) > 3) {
+      // Note that if this attempt at formatting results in more
+      // digits left of the decimal point than maxDigitsLeft, then we must format this
+      // number according to the next magnitude up. We'll attempt this up to 3 times
+      // to find a suitable formatting, incrementing the magnitude each time.
+      let attempts = 0;
+      while (countDigits(numParts.int) > maxDigitsLeft && attempts < 3) {
         numParts = formatNumWithOrderOfMag(
           x,
-          magE + 3,
+          magE + maxDigitsLeft + attempts,
           defaultMaxDigitsRight,
-          true
+          true,
         );
+        attempts++;
       }
     }
 
@@ -169,7 +174,9 @@ export class PerRangeFormatter implements Formatter {
       numParts.suffix = numParts.suffix.replace("E", "e");
     }
     if (this.options.numberKind === NumberKind.DOLLAR) {
-      numParts.dollar = "$";
+      numParts.currencySymbol = "$";
+    } else if (this.options.numberKind === NumberKind.EURO) {
+      numParts.currencySymbol = "€";
     }
     if (this.options.numberKind === NumberKind.PERCENT) {
       numParts.percent = "%";

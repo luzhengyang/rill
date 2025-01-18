@@ -16,14 +16,15 @@ import (
 	"github.com/rilldata/rill/runtime"
 	"github.com/rilldata/rill/runtime/pkg/activity"
 	"github.com/rilldata/rill/runtime/pkg/graceful"
+	"github.com/rilldata/rill/runtime/pkg/httputil"
 	"github.com/rilldata/rill/runtime/pkg/middleware"
 	"github.com/rilldata/rill/runtime/pkg/observability"
 	"github.com/rilldata/rill/runtime/pkg/ratelimit"
 	"github.com/rilldata/rill/runtime/pkg/securetoken"
+	"github.com/rilldata/rill/runtime/queries"
 	"github.com/rilldata/rill/runtime/server/auth"
 	"github.com/rs/cors"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
-	"go.opentelemetry.io/otel"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -32,20 +33,19 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-var tracer = otel.Tracer("github.com/rilldata/rill/runtime/server")
-
 var ErrForbidden = status.Error(codes.Unauthenticated, "action not allowed")
 
 type Options struct {
-	HTTPPort         int
-	GRPCPort         int
-	AllowedOrigins   []string
-	ServePrometheus  bool
-	SessionKeyPairs  [][]byte
-	AuthEnable       bool
-	AuthIssuerURL    string
-	AuthAudienceURL  string
-	DownloadRowLimit *int64
+	HTTPPort        int
+	GRPCPort        int
+	AllowedOrigins  []string
+	ServePrometheus bool
+	SessionKeyPairs [][]byte
+	AuthEnable      bool
+	AuthIssuerURL   string
+	AuthAudienceURL string
+	TLSCertPath     string
+	TLSKeyPath      string
 }
 
 type Server struct {
@@ -58,7 +58,7 @@ type Server struct {
 	aud      *auth.Audience
 	codec    *securetoken.Codec
 	limiter  ratelimit.Limiter
-	activity activity.Client
+	activity *activity.Client
 }
 
 var (
@@ -69,7 +69,7 @@ var (
 
 // NewServer creates a new runtime server.
 // The provided ctx is used for the lifetime of the server for background refresh of the JWKS that is used to validate auth tokens.
-func NewServer(ctx context.Context, opts *Options, rt *runtime.Runtime, logger *zap.Logger, limiter ratelimit.Limiter, activityClient activity.Client) (*Server, error) {
+func NewServer(ctx context.Context, opts *Options, rt *runtime.Runtime, logger *zap.Logger, limiter ratelimit.Limiter, activityClient *activity.Client) (*Server, error) {
 	// The runtime doesn't actually set cookies, but we use securecookie to encode/decode ephemeral tokens.
 	// If no session key pairs are provided, we generate a random one for the duration of the process.
 	var codec *securetoken.Codec
@@ -107,9 +107,7 @@ func (s *Server) Close() error {
 		s.aud.Close()
 	}
 
-	err := s.activity.Close()
-
-	return err
+	return nil
 }
 
 // Ping implements RuntimeService
@@ -148,7 +146,7 @@ func (s *Server) ServeGRPC(ctx context.Context) error {
 	runtimev1.RegisterRuntimeServiceServer(server, s)
 	runtimev1.RegisterQueryServiceServer(server, s)
 	runtimev1.RegisterConnectorServiceServer(server, s)
-	s.logger.Named("console").Sugar().Infof("serving runtime gRPC on port:%v", s.opts.GRPCPort)
+	s.logger.Sugar().Infof("serving runtime gRPC on port:%v", s.opts.GRPCPort)
 	return graceful.ServeGRPC(ctx, server, s.opts.GRPCPort)
 }
 
@@ -160,8 +158,13 @@ func (s *Server) ServeHTTP(ctx context.Context, registerAdditionalHandlers func(
 	}
 
 	server := &http.Server{Handler: handler}
-	s.logger.Named("console").Sugar().Infof("serving HTTP on port:%v", s.opts.HTTPPort)
-	return graceful.ServeHTTP(ctx, server, s.opts.HTTPPort)
+	s.logger.Sugar().Infof("serving HTTP on port:%v", s.opts.HTTPPort)
+	options := graceful.ServeOptions{
+		Port:     s.opts.HTTPPort,
+		CertPath: s.opts.TLSCertPath,
+		KeyPath:  s.opts.TLSKeyPath,
+	}
+	return graceful.ServeHTTP(ctx, server, options)
 }
 
 // HTTPHandler HTTP handler serving REST gateway.
@@ -169,7 +172,7 @@ func (s *Server) HTTPHandler(ctx context.Context, registerAdditionalHandlers fun
 	// Create REST gateway
 	gwMux := gateway.NewServeMux(gateway.WithErrorHandler(HTTPErrorHandler))
 	opts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
-	grpcAddress := fmt.Sprintf(":%d", s.opts.GRPCPort)
+	grpcAddress := fmt.Sprintf("localhost:%d", s.opts.GRPCPort)
 	err := runtimev1.RegisterRuntimeServiceHandlerFromEndpoint(ctx, gwMux, grpcAddress, opts)
 	if err != nil {
 		return nil, err
@@ -200,8 +203,20 @@ func (s *Server) HTTPHandler(ctx context.Context, registerAdditionalHandlers fun
 	// Add gRPC-gateway on httpMux
 	httpMux.Handle("/v1/", gwMux)
 
+	// Add HTTP handler for health check
+	observability.MuxHandle(httpMux, "/v1/health", observability.Middleware("runtime", s.logger, http.HandlerFunc(s.healthCheckHandler)))
+
 	// Add HTTP handler for query export downloads
-	httpMux.Handle("/v1/download", auth.HTTPMiddleware(s.aud, http.HandlerFunc(s.downloadHandler)))
+	observability.MuxHandle(httpMux, "/v1/download", observability.Middleware("runtime", s.logger, auth.HTTPMiddleware(s.aud, http.HandlerFunc(s.downloadHandler))))
+
+	// Add handler for dynamic APIs, i.e. APIs backed by resolvers (such as custom APIs defined in YAML).
+	observability.MuxHandle(httpMux, "/v1/instances/{instance_id}/api/{name...}", observability.Middleware("runtime", s.logger, auth.HTTPMiddleware(s.aud, httputil.Handler(s.apiHandler))))
+
+	// Add handler for combined OpenAPI spec of custom APIs
+	observability.MuxHandle(httpMux, "/v1/instances/{instance_id}/api/openapi", observability.Middleware("runtime", s.logger, auth.HTTPMiddleware(s.aud, httputil.Handler(s.combinedOpenAPISpec))))
+
+	// Serving static assets
+	observability.MuxHandle(httpMux, "/v1/instances/{instance_id}/assets/{path...}", observability.Middleware("runtime", s.logger, auth.HTTPMiddleware(s.aud, httputil.Handler(s.assetsHandler))))
 
 	// Add Prometheus
 	if s.opts.ServePrometheus {
@@ -307,6 +322,12 @@ func mapGRPCError(err error) error {
 	if errors.Is(err, context.Canceled) {
 		return status.Error(codes.Canceled, err.Error())
 	}
+	if errors.Is(err, queries.ErrForbidden) {
+		return ErrForbidden
+	}
+	if errors.Is(err, runtime.ErrForbidden) {
+		return ErrForbidden
+	}
 	return err
 }
 
@@ -322,7 +343,7 @@ func (s *Server) checkRateLimit(ctx context.Context) (context.Context, error) {
 		limitKey := ratelimit.AnonLimitKey(method, observability.GrpcPeer(ctx))
 		if err := s.limiter.Limit(ctx, limitKey, ratelimit.Public); err != nil {
 			if errors.As(err, &ratelimit.QuotaExceededError{}) {
-				return ctx, status.Errorf(codes.ResourceExhausted, err.Error())
+				return ctx, status.Error(codes.ResourceExhausted, err.Error())
 			}
 			return ctx, err
 		}

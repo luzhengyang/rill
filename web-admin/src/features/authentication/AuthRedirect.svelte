@@ -1,18 +1,13 @@
 <script lang="ts">
-  import { goto } from "$app/navigation";
+  import { redirectToLogin } from "@rilldata/web-admin/client/redirect-utils";
   import { createAdminServiceGetCurrentUser } from "../../client";
-  import { ADMIN_URL } from "../../client/http-client";
+
+  const user = createAdminServiceGetCurrentUser();
 
   // redirect to login if not logged in
-  const user = createAdminServiceGetCurrentUser({
-    query: {
-      onSuccess: (data) => {
-        if (!data.user) {
-          goto(`${ADMIN_URL}/auth/login?redirect=${window.origin}`);
-        }
-      },
-    },
-  });
+  $: if ($user.isSuccess && !$user.data.user) {
+    redirectToLogin();
+  }
 </script>
 
 {#if $user.data && $user.data.user}

@@ -2,29 +2,32 @@ import type { MetricsViewSpecDimensionV2 } from "@rilldata/web-common/runtime-cl
 import type { DashboardDataSources } from "./types";
 
 export const allDimensions = ({
-  metricsSpecQueryResult,
-}: DashboardDataSources): MetricsViewSpecDimensionV2[] | undefined => {
-  return metricsSpecQueryResult.data?.dimensions;
+  validMetricsView,
+  validExplore,
+}: Pick<
+  DashboardDataSources,
+  "validMetricsView" | "validExplore"
+>): MetricsViewSpecDimensionV2[] => {
+  return (
+    validMetricsView?.dimensions?.filter((d) =>
+      validExplore?.dimensions?.includes(d.name ?? ""),
+    ) ?? []
+  );
 };
 
 export const visibleDimensions = ({
-  metricsSpecQueryResult,
+  validMetricsView,
   dashboard,
 }: DashboardDataSources): MetricsViewSpecDimensionV2[] => {
-  const dimensions = metricsSpecQueryResult.data?.dimensions?.filter(
-    (d) => d.name && dashboard.visibleDimensionKeys.has(d.name)
+  return (
+    validMetricsView?.dimensions?.filter(
+      (d) => d.name && dashboard.visibleDimensionKeys.has(d.name),
+    ) ?? []
   );
-  return dimensions === undefined ? [] : dimensions;
-};
-
-export const dimensionTableDimName = ({
-  dashboard,
-}: DashboardDataSources): string | undefined => {
-  return dashboard.selectedDimensionName;
 };
 
 export const dimensionTableColumnName = (
-  dashData: DashboardDataSources
+  dashData: DashboardDataSources,
 ): ((name: string) => string) => {
   return (name: string) => {
     const dim = getDimensionByName(dashData)(name);
@@ -33,31 +36,28 @@ export const dimensionTableColumnName = (
 };
 
 export const getDimensionByName = (
-  dashData: DashboardDataSources
+  dashData: DashboardDataSources,
 ): ((name: string) => MetricsViewSpecDimensionV2 | undefined) => {
   return (name: string) => {
     return allDimensions(dashData)?.find(
-      (dimension) => dimension.name === name
+      (dimension) => dimension.name === name,
     );
   };
 };
 
 export const getDimensionDisplayName = (
-  dashData: DashboardDataSources
+  dashData: DashboardDataSources,
 ): ((name: string) => string) => {
   return (name: string) => {
     const dim = getDimensionByName(dashData)(name);
-    return dim?.label || name;
+    return (dim?.displayName?.length ? dim?.displayName : dim?.name) ?? name;
   };
 };
 
-export const getDimensionDescription = (
-  dashData: DashboardDataSources
-): ((name: string) => string) => {
-  return (name: string) => {
-    const dim = getDimensionByName(dashData)(name);
-    return dim?.description || "";
-  };
+export const comparisonDimension = (dashData: DashboardDataSources) => {
+  const dimName = dashData.dashboard.selectedComparisonDimension;
+  if (!dimName) return undefined;
+  return getDimensionByName(dashData)(dimName);
 };
 
 export const dimensionSelectors = {
@@ -81,18 +81,12 @@ export const dimensionSelectors = {
    * given its "key" name.
    */
   getDimensionDisplayName,
-  /**
-   * Returns a function that can be used to get a dimension's description
-   * given its "key" name. Returns an empty string if the dimension has no description.
-   */
-  getDimensionDescription,
 
   /**
-   * Gets the name of the dimension that is currently selected in the dimension table.
-   * Returns undefined if no dimension is selected, in which case the dimension table
-   * is not shown.
+   * Gets the dimension that is currently being compared.
+   * Returns undefined otherwise.
    */
-  dimensionTableDimName,
+  comparisonDimension,
 
   /**
    * Gets the name of the column that is currently selected in the dimension table.

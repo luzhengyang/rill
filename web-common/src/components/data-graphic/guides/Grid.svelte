@@ -24,23 +24,13 @@
   export let yDashArray = "1,1";
   export let yThickness = 1;
 
-  let xTicks = [];
-  let yTicks = [];
+  let xTicks: number[] | Date[] = [];
+  let yTicks: number[] | Date[] = [];
 
   $: if ($config) {
-    xTicks = getTicks(
-      "x",
-      $xScale,
-      $config.graphicWidth,
-      $config[`xType`] === "date"
-    );
+    xTicks = getTicks("x", $xScale, $config.graphicWidth, $config[`xType`]);
 
-    yTicks = getTicks(
-      "y",
-      $yScale,
-      $config.graphicHeight,
-      $config[`yType`] === "date"
-    );
+    yTicks = getTicks("y", $yScale, $config.graphicHeight, $config[`yType`]);
   }
 </script>
 

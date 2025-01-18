@@ -13,7 +13,7 @@
 
 <script lang="ts">
   import { setContext, onDestroy } from "svelte";
-  import { writable, get, Writable } from "svelte/store";
+  import { writable, get, type Writable } from "svelte/store";
   import { createEventDispatcher } from "svelte";
   const dispatch = createEventDispatcher();
 
@@ -39,12 +39,12 @@
         typeof subButtonKey !== "string"
       ) {
         throw new Error(
-          `Subbutton value must be a number or string. Received ${typeof subButtonKey}.`
+          `Subbutton value must be a number or string. Received ${typeof subButtonKey}.`,
         );
       }
       if (get(subButtons).includes(subButtonKey)) {
         throw new Error(
-          `Subbutton with value ${subButtonKey} already registered. Subbutton values must be unique.`
+          `Subbutton with value ${subButtonKey} already registered. Subbutton values must be unique.`,
         );
       }
       subButtons.set([...get(subButtons), subButtonKey]);
@@ -60,7 +60,7 @@
         selectedKeys.update((current) =>
           current.findIndex((key) => key === subButtonKey) === -1
             ? current
-            : current.filter((key) => key !== subButtonKey)
+            : current.filter((key) => key !== subButtonKey),
         );
       });
     },

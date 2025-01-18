@@ -6,25 +6,21 @@ title: rill user
 
 Manage users
 
-### Flags
-
-```
-      --api-token string   Token for authenticating with the admin API
-```
-
 ### Global flags
 
 ```
-  -h, --help          Print usage
-      --interactive   Prompt for missing required parameters (default true)
+      --api-token string   Token for authenticating with the cloud API
+      --format string      Output format (options: "human", "json", "csv") (default "human")
+  -h, --help               Print usage
+      --interactive        Prompt for missing required parameters (default true)
 ```
 
 ### SEE ALSO
 
-* [rill](../cli.md)	 - Rill CLI
-* [rill user add](add.md)	 - Add
-* [rill user list](list.md)	 - List
-* [rill user remove](remove.md)	 - Remove
-* [rill user set-role](set-role.md)	 - Set Role
+* [rill](../cli.md)	 - A CLI for Rill
+* [rill user add](add.md)	 - Add user to a project, organization or group
+* [rill user list](list.md)	 - List users
+* [rill user remove](remove.md)	 - Remove a user
+* [rill user set-role](set-role.md)	 - Change a user's role
 * [rill user whitelist](whitelist/whitelist.md)	 - Whitelist access by email domain
 

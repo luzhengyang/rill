@@ -1,22 +1,35 @@
 import DeltaChange from "@rilldata/web-common/features/dashboards/dimension-table/DeltaChange.svelte";
 import DeltaChangePercentage from "@rilldata/web-common/features/dashboards/dimension-table/DeltaChangePercentage.svelte";
+import {
+  ComparisonDeltaAbsoluteSuffix,
+  ComparisonDeltaRelativeSuffix,
+} from "@rilldata/web-common/features/dashboards/filters/measure-filters/measure-filter-entry";
+import {
+  createInExpression,
+  createLikeExpression,
+  createOrExpression,
+  matchExpressionByName,
+  filterExpressions,
+  createAndExpression,
+  copyFilterExpression,
+} from "@rilldata/web-common/features/dashboards/stores/filter-utils";
+import {
+  type V1MetricsViewAggregationResponseDataItem,
+  V1Operation,
+} from "../../../runtime-client";
 import PercentOfTotal from "./PercentOfTotal.svelte";
 
 import { PERC_DIFF } from "../../../components/data-types/type-utils";
 import type {
-  MetricsViewDimension,
+  MetricsViewSpecDimensionV2,
   MetricsViewSpecMeasureV2,
-  V1MetricsViewComparisonRow,
-  V1MetricsViewComparisonValue,
-  V1MetricsViewFilter,
+  V1Expression,
   V1MetricsViewToplistResponseDataItem,
 } from "../../../runtime-client";
 
-import type { VirtualizedTableColumns } from "@rilldata/web-local/lib/types";
-import type { VirtualizedTableConfig } from "@rilldata/web-common/components/virtualized-table/types";
+import type { VirtualizedTableColumns } from "@rilldata/web-common/components/virtualized-table/types";
 
 import type { SvelteComponent } from "svelte";
-import { getDimensionColumn } from "../dashboard-utils";
 import type { DimensionTableRow } from "./dimension-table-types";
 import { getFiltersForOtherDimensions } from "../selectors";
 import { SortType } from "../proto-state/derived-types";
@@ -24,51 +37,58 @@ import type { MetricsExplorerEntity } from "../stores/metrics-explorer-entity";
 import { createMeasureValueFormatter } from "@rilldata/web-common/lib/number-formatting/format-measure-value";
 import { FormatPreset } from "@rilldata/web-common/lib/number-formatting/humanizer-types";
 import { formatMeasurePercentageDifference } from "@rilldata/web-common/lib/number-formatting/percentage-formatter";
+import type { DimensionTableConfig } from "./DimensionTableConfig";
 
 /** Returns an updated filter set for a given dimension on search */
 export function updateFilterOnSearch(
-  filterForDimension: V1MetricsViewFilter,
+  filterForDimension: V1Expression,
   searchText: string,
-  dimensionName: string
-): V1MetricsViewFilter {
-  const filterSet = JSON.parse(JSON.stringify(filterForDimension));
+  dimensionName: string,
+): V1Expression | undefined {
+  if (!filterForDimension) return undefined;
+  // create a copy
   const addNull = "null".includes(searchText);
   if (searchText !== "") {
-    let foundDimension = false;
+    let cond: V1Expression;
+    if (addNull) {
+      cond = createOrExpression([
+        // TODO: do we need a `IS NULL` expression?
+        createInExpression(dimensionName, [null]),
+        createLikeExpression(dimensionName, `%${searchText}%`),
+      ]);
+    } else {
+      cond = createLikeExpression(dimensionName, `%${searchText}%`);
+    }
 
-    filterSet["include"].forEach((filter) => {
-      if (filter.name === dimensionName) {
-        filter.like = [`%${searchText}%`];
-        foundDimension = true;
-        if (addNull) filter.in.push(null);
-      }
-    });
-
-    if (!foundDimension) {
-      filterSet["include"].push({
-        name: dimensionName,
-        in: addNull ? [null] : [],
-        like: [`%${searchText}%`],
-      });
+    filterForDimension = copyFilterExpression(filterForDimension);
+    const filterIdx = filterForDimension.cond?.exprs?.findIndex((e) =>
+      matchExpressionByName(e, dimensionName),
+    );
+    if (filterIdx === undefined || filterIdx === -1) {
+      filterForDimension.cond?.exprs?.push(cond);
+    } else {
+      filterForDimension.cond?.exprs?.splice(filterIdx, 0, cond);
     }
   } else {
-    filterSet["include"] = filterSet["include"].filter((f) => f.in.length);
-    filterSet["include"].forEach((f) => {
-      delete f.like;
-    });
+    filterForDimension =
+      filterExpressions(
+        filterForDimension,
+        (e) =>
+          e.cond?.op !== V1Operation.OPERATION_LIKE &&
+          e.cond?.op !== V1Operation.OPERATION_NLIKE,
+      ) ?? createAndExpression([]);
   }
-  return filterSet;
+  return filterForDimension;
 }
 
 export function getDimensionFilterWithSearch(
-  filters: V1MetricsViewFilter,
+  filters: V1Expression,
   searchText: string,
-  dimensionName: string
+  dimensionName: string,
 ) {
-  const filterForDimension = getFiltersForOtherDimensions(
-    filters,
-    dimensionName
-  );
+  const filterForDimension =
+    getFiltersForOtherDimensions(filters, dimensionName) ??
+    createAndExpression([]);
 
   return updateFilterOnSearch(filterForDimension, searchText, dimensionName);
 }
@@ -76,7 +96,7 @@ export function getDimensionFilterWithSearch(
 export function computePercentOfTotal(
   values: V1MetricsViewToplistResponseDataItem[],
   total: number,
-  measureName: string
+  measureName: string,
 ) {
   for (const value of values) {
     if (total === 0 || total === null || total === undefined) {
@@ -93,7 +113,7 @@ export function computePercentOfTotal(
 
 export function getComparisonProperties(
   measureName: string,
-  selectedMeasure: MetricsViewSpecMeasureV2
+  selectedMeasure: MetricsViewSpecMeasureV2,
 ): {
   /**
    * "component" in this context is a Svelte component that will be
@@ -127,13 +147,13 @@ export function getComparisonProperties(
     };
   }
   throw new Error(
-    "Invalid measure name, getComparisonProperties must only be called on context columns"
+    "Invalid measure name, getComparisonProperties must only be called on context columns",
   );
 }
 
 export function estimateColumnCharacterWidths(
   columns: VirtualizedTableColumns[],
-  rows: V1MetricsViewToplistResponseDataItem[]
+  rows: V1MetricsViewToplistResponseDataItem[],
 ) {
   const columnWidths: { [key: string]: number } = {};
   let largestColumnLength = 0;
@@ -143,7 +163,7 @@ export function estimateColumnCharacterWidths(
       .filter((row) => row[column.name] !== null)
       .map(
         (row) =>
-          `${row["__formatted_" + column.name] || row[column.name]}`.length
+          `${row["__formatted_" + column.name] || row[column.name]}`.length,
       );
     values.sort();
     const largest = Math.max(...values);
@@ -151,7 +171,7 @@ export function estimateColumnCharacterWidths(
     if (i != 0) {
       largestColumnLength = Math.max(
         largestColumnLength,
-        column.label?.length || column.name.length
+        column.label?.length || column.name.length,
       );
     }
   });
@@ -173,9 +193,9 @@ export function estimateColumnSizes(
     [key: string]: number;
   },
   containerWidth: number,
-  config: VirtualizedTableConfig
+  config: DimensionTableConfig,
 ): number[] {
-  const estimateColumnSize = columns.map((column, i) => {
+  const estimatedColumnSizes = columns.map((column, i) => {
     if (column.name.includes("delta")) return config.comparisonColumnWidth;
     if (i != 0) return config.defaultColumnWidth;
 
@@ -204,8 +224,8 @@ export function estimateColumnSizes(
             largestStringLength,
             effectiveHeaderWidth,
             /** All columns must be minColumnWidth regardless of user settings. */
-            config.minColumnWidth
-          )
+            config.minColumnWidth,
+          ),
         )
       : /** if there isn't a longet string length for some reason, let's go with a
          * default column width. We should not be in this state.
@@ -213,26 +233,16 @@ export function estimateColumnSizes(
         config.defaultColumnWidth;
   });
 
-  const measureColumnSizeSum = estimateColumnSize
-    .slice(1)
-    .reduce((a, b) => a + b, 0);
-
-  /* Dimension column should expand to cover whole container */
-  estimateColumnSize[0] = Math.max(
-    containerWidth - measureColumnSizeSum - config.indexWidth,
-    estimateColumnSize[0]
-  );
-
-  return estimateColumnSize;
+  return estimatedColumnSizes;
 }
 
 export function prepareVirtualizedDimTableColumns(
   dash: MetricsExplorerEntity,
   allMeasures: MetricsViewSpecMeasureV2[],
   measureTotals: { [key: string]: number },
-  dimension: MetricsViewDimension,
+  dimension: MetricsViewSpecDimensionV2,
   timeComparison: boolean,
-  validPercentOfTotal: boolean
+  validPercentOfTotal: boolean,
 ): VirtualizedTableColumns[] {
   const sortType = dash.dashboardSortType;
   const sortDirection = dash.sortDirection;
@@ -240,13 +250,15 @@ export function prepareVirtualizedDimTableColumns(
   const measureNames = allMeasures.map((m) => m.name);
   const leaderboardMeasureName = dash.leaderboardMeasureName;
   const selectedMeasure = allMeasures.find(
-    (m) => m.name === leaderboardMeasureName
+    (m) => m.name === leaderboardMeasureName,
   );
 
-  const dimensionColumn = getDimensionColumn(dimension);
+  const dimensionColumn = dimension.name ?? "";
 
   // copy column names so we don't mutate the original
-  const columnNames = [...dash.visibleMeasureKeys];
+  const columnNames = [...dash.visibleMeasureKeys].filter((m) =>
+    allMeasures.some((am) => am.name === m),
+  );
 
   // don't add context columns if sorting by dimension
   if (selectedMeasure && sortType !== SortType.DIMENSION) {
@@ -254,7 +266,7 @@ export function prepareVirtualizedDimTableColumns(
       columnNames,
       timeComparison,
       validPercentOfTotal,
-      selectedMeasure
+      selectedMeasure,
     );
   }
   // Make dimension the first column
@@ -300,7 +312,7 @@ export function prepareVirtualizedDimTableColumns(
         columnOut = {
           name,
           type: "INT",
-          label: measure?.label || measure?.expression,
+          label: measure?.displayName || measure?.expression,
           description: measure?.description,
           total: measureTotals[measure?.name ?? ""] || 0,
           enableResize: false,
@@ -313,7 +325,7 @@ export function prepareVirtualizedDimTableColumns(
         columnOut = {
           name,
           type: "VARCHAR",
-          label: dimension?.label,
+          label: dimension?.displayName,
           enableResize: true,
           highlight,
           sorted,
@@ -337,7 +349,7 @@ export function prepareVirtualizedDimTableColumns(
     .filter((column) => column !== undefined);
 
   // cast is safe, because we filtered out undefined columns
-  return (columns as VirtualizedTableColumns[]) ?? [];
+  return columns ?? [];
 }
 
 /**
@@ -350,7 +362,7 @@ export function addContextColumnNames(
   columnNames: string[],
   timeComparison: boolean,
   validPercentOfTotal: boolean,
-  selectedMeasure: MetricsViewSpecMeasureV2
+  selectedMeasure: MetricsViewSpecMeasureV2,
 ) {
   const name = selectedMeasure?.name;
   if (!name) return;
@@ -375,7 +387,7 @@ export function addContextColumnNames(
     columnNames.splice(
       sortByColumnIndex + percentOfTotalSpliceIndex,
       0,
-      `${name}_percent_of_total`
+      `${name}_percent_of_total`,
     );
   }
 }
@@ -384,7 +396,7 @@ function castUnknownToNumberOrNull(val: unknown): number | null {
   if (typeof val === "number") return val;
   if (val === null || val === undefined) return null;
   console.warn(
-    `castUnknownNumberOrNull should only be used to cast unknowns that should be numbers, null, or undefined to numbers or null. Got: ${val}`
+    `castUnknownNumberOrNull should only be used to cast unknowns that should be numbers, null, or undefined to numbers or null. Got: ${val}`,
   );
   return val as number;
 }
@@ -396,7 +408,7 @@ function castUnknownToNumberOrNull(val: unknown): number | null {
  *
  */
 export function prepareDimensionTableRows(
-  queryRows: V1MetricsViewComparisonRow[],
+  queryRows: V1MetricsViewAggregationResponseDataItem[],
   // all of the measures defined for this metrics spec,
   // including those that are not visible
   allMeasuresForSpec: MetricsViewSpecMeasureV2[],
@@ -404,27 +416,24 @@ export function prepareDimensionTableRows(
   dimensionColumn: string,
   addDeltas: boolean,
   addPercentOfTotal: boolean,
-  unfilteredTotal: number
+  unfilteredTotal: number,
 ): DimensionTableRow[] {
   if (!queryRows || !queryRows.length) return [];
 
   const formattersForMeasures: { [key: string]: (val: number) => string } =
     Object.fromEntries(
-      allMeasuresForSpec.map((m) => [m.name, createMeasureValueFormatter(m)])
+      allMeasuresForSpec.map((m) => [m.name, createMeasureValueFormatter(m)]),
     );
 
   const tableRows: DimensionTableRow[] = queryRows
-    .filter(
-      (row) => row.measureValues !== undefined && row.measureValues !== null
-    )
+    .filter((row) => row[activeMeasureName] !== undefined)
     .map((row) => {
-      // cast is safe since we filtered out rows without measureValues
-      const measureValues = row.measureValues as V1MetricsViewComparisonValue[];
+      const measureValue = row[activeMeasureName];
 
-      const rawVals: [string, number | null][] = measureValues.map((m) => [
-        m.measureName?.toString() ?? "",
-        castUnknownToNumberOrNull(m.baseValue),
-      ]);
+      // cast is safe since we filtered out rows without measureValues
+      const rawVals: [string, number | null][] = allMeasuresForSpec
+        .filter((m) => m.name! in row)
+        .map((m) => [m.name!, castUnknownToNumberOrNull(row[m.name!])]);
 
       const formattedVals: [string, string | number | PERC_DIFF][] =
         rawVals.map(([name, val]) => [
@@ -435,41 +444,31 @@ export function prepareDimensionTableRows(
         ]);
 
       const rowOut: DimensionTableRow = Object.fromEntries([
-        [dimensionColumn, row.dimensionValue as string],
+        [dimensionColumn, row[dimensionColumn] as string],
         ...rawVals,
         ...formattedVals,
       ]);
 
-      const activeMeasure = measureValues.find(
-        (m) => m.measureName === activeMeasureName
-      );
+      if (addDeltas) {
+        const deltaAbs = row[activeMeasureName + ComparisonDeltaAbsoluteSuffix];
+        rowOut[`${activeMeasureName}_delta`] =
+          castUnknownToNumberOrNull(deltaAbs);
 
-      if (addDeltas && activeMeasure) {
-        rowOut[`${activeMeasureName}_delta`] = castUnknownToNumberOrNull(
-          activeMeasure.deltaAbs
-        );
+        rowOut[`__formatted_${activeMeasureName}_delta`] = deltaAbs
+          ? formattersForMeasures[activeMeasureName](deltaAbs as number)
+          : PERC_DIFF.PREV_VALUE_NO_DATA;
 
-        rowOut[`__formatted_${activeMeasureName}_delta`] =
-          activeMeasure.deltaAbs
-            ? formattersForMeasures[activeMeasureName](
-                activeMeasure.deltaAbs as number
-              )
-            : PERC_DIFF.PREV_VALUE_NO_DATA;
+        const deltaRel = row[activeMeasureName + ComparisonDeltaRelativeSuffix];
+        rowOut[`${activeMeasureName}_delta_perc`] =
+          castUnknownToNumberOrNull(deltaRel);
 
-        rowOut[`${activeMeasureName}_delta_perc`] = castUnknownToNumberOrNull(
-          activeMeasure.deltaRel
-        );
-
-        rowOut[`__formatted_${activeMeasureName}_delta_perc`] =
-          activeMeasure.deltaRel
-            ? formatMeasurePercentageDifference(
-                activeMeasure.deltaRel as number
-              )
-            : PERC_DIFF.PREV_VALUE_NO_DATA;
+        rowOut[`__formatted_${activeMeasureName}_delta_perc`] = deltaRel
+          ? formatMeasurePercentageDifference(deltaRel as number)
+          : PERC_DIFF.PREV_VALUE_NO_DATA;
       }
 
-      if (addPercentOfTotal && activeMeasure) {
-        const value = castUnknownToNumberOrNull(activeMeasure.baseValue);
+      if (addPercentOfTotal) {
+        const value = castUnknownToNumberOrNull(measureValue);
 
         if (value === null || unfilteredTotal === 0 || !unfilteredTotal) {
           rowOut[activeMeasureName + "_percent_of_total"] =
@@ -489,23 +488,4 @@ export function prepareDimensionTableRows(
       return rowOut;
     });
   return tableRows;
-}
-
-export function getSelectedRowIndicesFromFilters(
-  rows: DimensionTableRow[],
-  filters: V1MetricsViewFilter,
-  dimensionName: string,
-  excludeMode: boolean
-): number[] {
-  const selectedDimValues =
-    ((excludeMode
-      ? filters?.exclude?.find((d) => d.name === dimensionName)?.in
-      : filters?.include?.find((d) => d.name === dimensionName)
-          ?.in) as string[]) ?? [];
-
-  return selectedDimValues
-    .map((label) => {
-      return rows.findIndex((row) => row[dimensionName] === label);
-    })
-    .filter((i) => i >= 0);
 }

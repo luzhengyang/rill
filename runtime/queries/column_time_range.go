@@ -7,7 +7,6 @@ import (
 	"io"
 	"time"
 
-	"github.com/marcboeker/go-duckdb"
 	runtimev1 "github.com/rilldata/rill/proto/gen/rill/runtime/v1"
 	"github.com/rilldata/rill/runtime"
 	"github.com/rilldata/rill/runtime/drivers"
@@ -15,10 +14,17 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+const hourInDay = 24
+
+var microsInDay = hourInDay * time.Hour.Microseconds()
+
 type ColumnTimeRange struct {
-	TableName  string
-	ColumnName string
-	Result     *runtimev1.TimeRangeSummary
+	Connector      string
+	Database       string
+	DatabaseSchema string
+	TableName      string
+	ColumnName     string
+	Result         *runtimev1.TimeRangeSummary
 }
 
 var _ runtime.Query = &ColumnTimeRange{}
@@ -51,15 +57,16 @@ func (q *ColumnTimeRange) UnmarshalResult(v any) error {
 }
 
 func (q *ColumnTimeRange) Resolve(ctx context.Context, rt *runtime.Runtime, instanceID string, priority int) error {
-	olap, release, err := rt.OLAP(ctx, instanceID)
+	olap, release, err := rt.OLAP(ctx, instanceID, q.Connector)
 	if err != nil {
 		return err
 	}
 	defer release()
 
+	// TODO: Try and merge this with metrics_time_range. Both use same queries but metrics_time_range uses a specific timestamp column from metrics_view
 	switch olap.Dialect() {
-	case drivers.DialectDuckDB:
-		return q.resolveDuckDB(ctx, olap, priority)
+	case drivers.DialectDuckDB, drivers.DialectClickHouse:
+		return q.resolveDuckDBAndClickhouse(ctx, olap, priority)
 	case drivers.DialectDruid:
 		return q.resolveDruid(ctx, olap, priority)
 	default:
@@ -67,11 +74,11 @@ func (q *ColumnTimeRange) Resolve(ctx context.Context, rt *runtime.Runtime, inst
 	}
 }
 
-func (q *ColumnTimeRange) resolveDuckDB(ctx context.Context, olap drivers.OLAPStore, priority int) error {
+func (q *ColumnTimeRange) resolveDuckDBAndClickhouse(ctx context.Context, olap drivers.OLAPStore, priority int) error {
 	rangeSQL := fmt.Sprintf(
-		"SELECT min(%[1]s) as \"min\", max(%[1]s) as \"max\", max(%[1]s) - min(%[1]s) as \"interval\" FROM %[2]s",
+		"SELECT min(%[1]s) as \"min\", max(%[1]s) as \"max\" FROM %[2]s",
 		safeName(q.ColumnName),
-		safeName(q.TableName),
+		drivers.DialectDuckDB.EscapeTable(q.Database, q.DatabaseSchema, q.TableName),
 	)
 
 	rows, err := olap.Execute(ctx, &drivers.Statement{
@@ -98,10 +105,6 @@ func (q *ColumnTimeRange) resolveDuckDB(ctx context.Context, olap drivers.OLAPSt
 			}
 			summary.Min = timestamppb.New(minTime)
 			summary.Max = timestamppb.New(rowMap["max"].(time.Time))
-			summary.Interval, err = handleDuckDBInterval(rowMap["interval"])
-			if err != nil {
-				return err
-			}
 		}
 		q.Result = summary
 		return nil
@@ -115,23 +118,6 @@ func (q *ColumnTimeRange) resolveDuckDB(ctx context.Context, olap drivers.OLAPSt
 	return errors.New("no rows returned")
 }
 
-func handleDuckDBInterval(interval any) (*runtimev1.TimeRangeSummary_Interval, error) {
-	switch i := interval.(type) {
-	case duckdb.Interval:
-		result := new(runtimev1.TimeRangeSummary_Interval)
-		result.Days = i.Days
-		result.Months = i.Months
-		result.Micros = i.Micros
-		return result, nil
-	case int64:
-		// for date type column interval is difference in num days for two dates
-		result := new(runtimev1.TimeRangeSummary_Interval)
-		result.Days = int32(i)
-		return result, nil
-	}
-	return nil, fmt.Errorf("cannot handle interval type %T", interval)
-}
-
 func (q *ColumnTimeRange) resolveDruid(ctx context.Context, olap drivers.OLAPStore, priority int) error {
 	var minTime, maxTime time.Time
 	group, ctx := errgroup.WithContext(ctx)
@@ -140,7 +126,7 @@ func (q *ColumnTimeRange) resolveDruid(ctx context.Context, olap drivers.OLAPSto
 		minSQL := fmt.Sprintf(
 			"SELECT min(%[1]s) as \"min\" FROM %[2]s",
 			safeName(q.ColumnName),
-			safeName(q.TableName),
+			drivers.DialectDruid.EscapeTable(q.Database, q.DatabaseSchema, q.TableName),
 		)
 
 		rows, err := olap.Execute(ctx, &drivers.Statement{
@@ -173,7 +159,7 @@ func (q *ColumnTimeRange) resolveDruid(ctx context.Context, olap drivers.OLAPSto
 		maxSQL := fmt.Sprintf(
 			"SELECT max(%[1]s) as \"max\" FROM %[2]s",
 			safeName(q.ColumnName),
-			safeName(q.TableName),
+			drivers.DialectDruid.EscapeTable(q.Database, q.DatabaseSchema, q.TableName),
 		)
 
 		rows, err := olap.Execute(ctx, &drivers.Statement{
@@ -210,9 +196,6 @@ func (q *ColumnTimeRange) resolveDruid(ctx context.Context, olap drivers.OLAPSto
 	summary := &runtimev1.TimeRangeSummary{}
 	summary.Min = timestamppb.New(minTime)
 	summary.Max = timestamppb.New(maxTime)
-	summary.Interval = &runtimev1.TimeRangeSummary_Interval{
-		Micros: maxTime.Sub(minTime).Microseconds(),
-	}
 	q.Result = summary
 
 	return nil

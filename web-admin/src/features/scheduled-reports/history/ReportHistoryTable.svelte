@@ -2,7 +2,7 @@
   import type { V1ReportExecution } from "@rilldata/web-common/runtime-client";
   import { runtime } from "@rilldata/web-common/runtime-client/runtime-store";
   import { flexRender } from "@tanstack/svelte-table";
-  import type { ColumnDef } from "@tanstack/table-core/src/types";
+  import type { ColumnDef } from "@tanstack/svelte-table";
   import Table from "../../../components/table/Table.svelte";
   import { useReport } from "../selectors";
   import NoRunsYet from "./NoRunsYet.svelte";
@@ -11,7 +11,9 @@
 
   export let report: string;
 
-  $: reportQuery = useReport($runtime.instanceId, report);
+  $: ({ instanceId } = $runtime);
+
+  $: reportQuery = useReport(instanceId, report);
 
   /**
    * Table column definitions.
@@ -45,14 +47,11 @@
     <NoRunsYet />
   {:else}
     <Table
+      kind="report"
       {columns}
       data={$reportQuery.data?.resource.report.state.executionHistory}
-      maxWidthOverride="max-w-[960px]"
     >
-      <ReportHistoryTableHeader
-        slot="header"
-        maxWidthOverride="max-w-[960px]"
-      />
+      <ReportHistoryTableHeader slot="header" />
     </Table>
   {/if}
 </div>

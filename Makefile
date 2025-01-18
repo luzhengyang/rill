@@ -1,3 +1,6 @@
+.PHONY: all
+all: cli
+
 .PHONY: cli
 cli: cli.prepare
 	go build -o rill cli/main.go 
@@ -13,15 +16,18 @@ cli.prepare:
 	mkdir -p runtime/pkg/examples/embed/dist
 	git clone --quiet https://github.com/rilldata/rill-examples.git runtime/pkg/examples/embed/dist
 	rm -rf runtime/pkg/examples/embed/dist/.git
+	cp scripts/install.sh cli/pkg/installscript/embed/install.sh
+	go run scripts/embed_duckdb_ext/main.go
 
 .PHONY: coverage.go
 coverage.go:
 	rm -rf coverage/go.out
 	mkdir -p coverage
 	# Run tests with coverage output. First builds the list of packages to include in coverage, excluding generated code in 'proto/gen'.
+	# NOTE(2024-03-01): Coverage fails on the generated code in 'proto/gen' without GOEXPERIMENT=nocoverageredesign. See https://github.com/golang/go/issues/55953.
 	set -e ; \
 		PACKAGES=$$(go list ./... | grep -v 'proto/gen/' | tr '\n' ',' | sed -e 's/,$$//' | sed -e 's/github.com\/rilldata\/rill/./g') ;\
-		go test ./... -short -v -coverprofile ./coverage/go.out -coverpkg $$PACKAGES
+		GOEXPERIMENT=nocoverageredesign go test ./... -short -v -coverprofile ./coverage/go.out -coverpkg $$PACKAGES
 	go tool cover -func coverage/go.out
 
 .PHONY: docs.generate
@@ -38,6 +44,7 @@ proto.generate:
 	cd proto && buf generate --exclude-path rill/ui
 	cd proto && buf generate --template buf.gen.openapi-admin.yaml --path rill/admin
 	cd proto && buf generate --template buf.gen.openapi-runtime.yaml --path rill/runtime
+	cd proto && buf generate --template buf.gen.local.yaml --path rill/local
 	cd proto && buf generate --template buf.gen.ui.yaml
 	npm run generate:runtime-client -w web-common
 	npm run generate:client -w web-admin

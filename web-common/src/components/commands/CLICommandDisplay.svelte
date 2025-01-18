@@ -1,9 +1,10 @@
 <script lang="ts">
   import Check from "@rilldata/web-common/components/icons/Check.svelte";
   import CopyIcon from "@rilldata/web-common/components/icons/CopyIcon.svelte";
-  import { copyToClipboard } from "@rilldata/web-common/lib/actions/shift-click-action";
+  import { copyToClipboard } from "@rilldata/web-common/lib/actions/copy-to-clipboard";
 
   export let command: string;
+  export let className = "";
 
   let copied = false;
 
@@ -14,7 +15,7 @@
   }
 </script>
 
-<div class="flex flex-row text-gray-800 my-1">
+<div class="flex flex-row text-gray-800 my-1 {className}">
   <div
     class="p-0.5 border border-gray-200 rounded-bl-sm rounded-tl-sm bg-gray-50 command-text"
   >
@@ -23,8 +24,8 @@
   <div
     role="button"
     tabindex="0"
-    class="p-1 border border-gray-200 rounded-br-sm rounded-tr-sm bg-gray-50
-    {copied ? '' : 'cursor-pointer'}"
+    class="p-1 border border-gray-200 rounded-br-sm rounded-tr-sm bg-gray-50"
+    class:cursor-pointer={copied}
     on:click={copyCommand}
     on:keydown={copyCommand}
   >

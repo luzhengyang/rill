@@ -4,11 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"sync"
+	"time"
 
 	runtimev1 "github.com/rilldata/rill/proto/gen/rill/runtime/v1"
+	"github.com/rilldata/rill/runtime/compilers/rillv1"
 	"github.com/rilldata/rill/runtime/drivers"
 	"github.com/rilldata/rill/runtime/pkg/activity"
+	"github.com/rilldata/rill/runtime/pkg/logbuffer"
+	"github.com/rilldata/rill/runtime/pkg/logutil"
 	"github.com/rilldata/rill/runtime/pkg/observability"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -19,6 +25,9 @@ import (
 // GlobalProjectParserName is the name of the instance-global project parser resource that is created for each new instance.
 var GlobalProjectParserName = &runtimev1.ResourceName{Kind: ResourceKindProjectParser, Name: "parser"}
 
+// instanceHeartbeatInterval is the interval at which instance heartbeat events are emitted.
+const instanceHeartbeatInterval = time.Minute
+
 // Instances returns all instances managed by the runtime.
 func (r *Runtime) Instances(ctx context.Context) ([]*drivers.Instance, error) {
 	return r.registryCache.list()
@@ -27,6 +36,25 @@ func (r *Runtime) Instances(ctx context.Context) ([]*drivers.Instance, error) {
 // Instance looks up an instance by ID. Instances are cached in-memory, so this is a cheap operation.
 func (r *Runtime) Instance(ctx context.Context, instanceID string) (*drivers.Instance, error) {
 	return r.registryCache.get(instanceID)
+}
+
+// InstanceConfig returns the instance's dynamic configuration.
+func (r *Runtime) InstanceConfig(ctx context.Context, instanceID string) (drivers.InstanceConfig, error) {
+	inst, err := r.Instance(ctx, instanceID)
+	if err != nil {
+		return drivers.InstanceConfig{}, err
+	}
+	return inst.Config()
+}
+
+// InstanceLogger returns a logger scoped for the given instance. Logs emitted to the logger will also be available in the instance's log buffer.
+func (r *Runtime) InstanceLogger(ctx context.Context, instanceID string) (*zap.Logger, error) {
+	return r.registryCache.getLogger(instanceID)
+}
+
+// InstanceLogs returns an in-memory buffer of recent logs related to the given instance.
+func (r *Runtime) InstanceLogs(ctx context.Context, instanceID string) (*logbuffer.Buffer, error) {
+	return r.registryCache.getLogbuffer(instanceID)
 }
 
 // Controller returns the controller for the given instance.
@@ -60,7 +88,7 @@ func (r *Runtime) EditInstance(ctx context.Context, inst *drivers.Instance, rest
 }
 
 // DeleteInstance deletes an instance and stops its controller.
-func (r *Runtime) DeleteInstance(ctx context.Context, instanceID string, dropDB bool) error {
+func (r *Runtime) DeleteInstance(ctx context.Context, instanceID string) error {
 	inst, err := r.registryCache.get(instanceID)
 	if err != nil {
 		if errors.Is(err, drivers.ErrNotFound) {
@@ -71,27 +99,17 @@ func (r *Runtime) DeleteInstance(ctx context.Context, instanceID string, dropDB 
 
 	// For idempotency, it's ok for some steps to fail
 
-	// Get OLAP info for dropDB
-	olapDriver, olapCfg, err := r.connectorConfig(ctx, instanceID, inst.OLAPConnector)
-	if err != nil {
-		r.logger.Error("delete instance: error getting config", zap.Error(err), zap.String("instance_id", instanceID), observability.ZapCtx(ctx))
-	}
-
 	// Delete the instance
 	completed, err := r.registryCache.delete(ctx, instanceID)
 	if err != nil {
-		r.logger.Error("delete instance: error deleting from registry", zap.Error(err), zap.String("instance_id", instanceID), observability.ZapCtx(ctx))
+		r.Logger.Error("delete instance: error deleting from registry", zap.Error(err), zap.String("instance_id", instanceID), observability.ZapCtx(ctx))
 	}
 
 	// Wait for the controller to stop and the connection cache to be evicted
 	<-completed
 
-	// Can now drop the OLAP
-	if dropDB {
-		err = drivers.Drop(olapDriver, olapCfg, r.logger)
-		if err != nil {
-			r.logger.Error("could not drop database", zap.Error(err), zap.String("instance_id", instanceID), observability.ZapCtx(ctx))
-		}
+	if err := r.storage.RemovePrefix(ctx, inst.ID); err != nil {
+		r.Logger.Error("could not drop instance data directory", zap.Error(err), zap.String("instance_id", instanceID), observability.ZapCtx(ctx))
 	}
 
 	// If catalog is not embedded, catalog data is in the metastore, and should be cleaned up
@@ -100,7 +118,7 @@ func (r *Runtime) DeleteInstance(ctx context.Context, instanceID string, dropDB 
 		if ok {
 			err = catalog.DeleteResources(ctx)
 			if err != nil {
-				r.logger.Error("delete instance: error deleting catalog", zap.Error(err), zap.String("instance_id", instanceID), observability.ZapCtx(ctx))
+				r.Logger.Error("delete instance: error deleting catalog", zap.Error(err), zap.String("instance_id", instanceID), observability.ZapCtx(ctx))
 			}
 		}
 	}
@@ -108,11 +126,25 @@ func (r *Runtime) DeleteInstance(ctx context.Context, instanceID string, dropDB 
 	return nil
 }
 
+// DataDir returns the path to a persistent data directory for the given instance. The directory is created if it doesn't exist.
+// Storage usage in the returned directory will be reported in the instance's heartbeat events.
+func (r *Runtime) DataDir(instanceID string, elem ...string) (string, error) {
+	return r.storage.WithPrefix(instanceID).DataDir(elem...)
+}
+
+// TempDir returns the path to a temporary directory for the given instance. The directory is created if it doesn't exist.
+// The TempDir is a fixed location. The caller is responsible for cleaning up after use.
+// The TempDir may be cleared after restarts.
+// Storage usage in the returned directory will be reported in the instance's heartbeat events.
+func (r *Runtime) TempDir(instanceID string, elem ...string) (string, error) {
+	return r.storage.WithPrefix(instanceID).TempDir(elem...)
+}
+
 // registryCache caches all the runtime's instances and manages the life-cycle of their controllers.
 // It ensures that a controller is started for every instance, and that a controller is completely stopped before getting restarted when edited.
 type registryCache struct {
 	logger        *zap.Logger
-	activity      activity.Client
+	activity      *activity.Client
 	rt            *Runtime
 	store         drivers.RegistryStore
 	mu            sync.RWMutex
@@ -122,9 +154,13 @@ type registryCache struct {
 }
 
 type instanceWithController struct {
+	instanceID    string
 	instance      *drivers.Instance
 	controller    *Controller
 	controllerErr error
+
+	logger    *zap.Logger
+	logbuffer *logbuffer.Buffer
 
 	// State for managing controller execution
 	ctx       context.Context
@@ -136,7 +172,7 @@ type instanceWithController struct {
 	reopen    bool
 }
 
-func newRegistryCache(ctx context.Context, rt *Runtime, registry drivers.RegistryStore, logger *zap.Logger, ac activity.Client) (*registryCache, error) {
+func newRegistryCache(rt *Runtime, registry drivers.RegistryStore, logger *zap.Logger, ac *activity.Client) *registryCache {
 	baseCtx, baseCtxCancel := context.WithCancel(context.Background())
 
 	r := &registryCache{
@@ -149,7 +185,7 @@ func newRegistryCache(ctx context.Context, rt *Runtime, registry drivers.Registr
 		baseCtxCancel: baseCtxCancel,
 	}
 
-	return r, nil
+	return r
 }
 
 func (r *registryCache) init(ctx context.Context) error {
@@ -161,13 +197,17 @@ func (r *registryCache) init(ctx context.Context) error {
 	}
 
 	for _, inst := range insts {
-		r.add(inst)
+		if err := r.add(inst); err != nil {
+			return err
+		}
 	}
+
+	go r.emitHeartbeats()
 
 	return nil
 }
 
-func (r *registryCache) close(ctx context.Context) error {
+func (r *registryCache) close(ctx context.Context) {
 	wg := sync.WaitGroup{}
 
 	r.mu.Lock()
@@ -186,7 +226,6 @@ func (r *registryCache) close(ctx context.Context) error {
 
 	r.baseCtxCancel()
 	wg.Wait()
-	return nil
 }
 
 func (r *registryCache) list() ([]*drivers.Instance, error) {
@@ -242,18 +281,38 @@ func (r *registryCache) getController(ctx context.Context, instanceID string) (*
 	return iwc.controller, nil
 }
 
+func (r *registryCache) getLogger(instanceID string) (*zap.Logger, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	iwc := r.instances[instanceID]
+	if iwc == nil {
+		return nil, drivers.ErrNotFound
+	}
+	return iwc.logger, nil
+}
+
+func (r *registryCache) getLogbuffer(instanceID string) (*logbuffer.Buffer, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	iwc := r.instances[instanceID]
+	if iwc == nil {
+		return nil, drivers.ErrNotFound
+	}
+	return iwc.logbuffer, nil
+}
+
 func (r *registryCache) create(ctx context.Context, inst *drivers.Instance) error {
 	err := r.store.CreateInstance(ctx, inst)
 	if err != nil {
 		return err
 	}
 
-	r.add(inst)
-
-	return nil
+	return r.add(inst)
 }
 
-func (r *registryCache) add(inst *drivers.Instance) {
+func (r *registryCache) add(inst *drivers.Instance) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -261,9 +320,24 @@ func (r *registryCache) add(inst *drivers.Instance) {
 		panic(fmt.Errorf("instance %q already open", inst.ID))
 	}
 
-	iwc := &instanceWithController{instance: inst}
+	iwc := &instanceWithController{
+		instanceID: inst.ID,
+		instance:   inst,
+	}
 	r.instances[inst.ID] = iwc
+
+	// Setup the logger to duplicate logs to a) the Zap logger, b) an in-memory buffer that exposes the logs over the API
+	buffer := logbuffer.NewBuffer(r.rt.opts.ControllerLogBufferCapacity, r.rt.opts.ControllerLogBufferSizeBytes)
+	bufferCore := logutil.NewBufferedZapCore(buffer)
+
+	baseCore := r.logger.Core() // Only add instance_id to the base core
+	baseCore = baseCore.With([]zapcore.Field{zap.String("instance_id", iwc.instanceID)})
+
+	iwc.logger = zap.New(zapcore.NewTee(baseCore, bufferCore))
+	iwc.logbuffer = buffer
+
 	r.restartController(iwc)
+	return nil
 }
 
 func (r *registryCache) edit(ctx context.Context, inst *drivers.Instance, restartController bool) error {
@@ -333,20 +407,33 @@ func (r *registryCache) restartController(iwc *instanceWithController) {
 			// Before starting the controller, sync the repo.
 			// This is necessary for resources (usually sources or models) that reference files in the repo,
 			// and may be triggered before the project parser is triggered and syncs the repo.
-			r.logger.Info("syncing repo", zap.String("instance_id", iwc.instance.ID))
-			err := r.ensureRepoSync(iwc.ctx, iwc.instance.ID)
+			iwc.logger.Debug("syncing repo")
+			err := r.ensureRepoSync(iwc.ctx, iwc.instanceID)
 			if err != nil {
-				r.logger.Warn("failed to sync repo", zap.String("instance_id", iwc.instance.ID), zap.Error(err))
+				iwc.logger.Warn("failed to sync repo", zap.Error(err))
 				// Even if repo sync failed, we'll start the controller
 			} else {
-				r.logger.Info("repo synced", zap.String("instance_id", iwc.instance.ID))
+				iwc.logger.Debug("repo synced")
+			}
+
+			// Before starting the controller, update the project config.
+			// This avoids the controller immediately cancelling and restarting if the project config has changed.
+			if err := r.updateProjectConfig(iwc); err != nil {
+				iwc.logger.Warn("failed to parse and update the project config before starting the controller", zap.Error(err))
+			}
+
+			// Build activity client.
+			ac := r.activity
+			inst, err := r.get(iwc.instanceID) // Need to use get since we don't currently hold the lock.
+			if err == nil {                    // Defensive handling to avoid a race condition if the instance was deleted.
+				ac = ac.With(instanceAnnotationsToAttribs(inst)...)
 			}
 
 			// Start controller
-			r.logger.Info("controller starting", zap.String("instance_id", iwc.instance.ID))
-			ctrl, err := NewController(iwc.ctx, r.rt, iwc.instance.ID, r.logger, r.activity)
+			iwc.logger.Debug("controller starting")
+			ctrl, err := NewController(iwc.ctx, r.rt, iwc.instanceID, iwc.logger, ac)
 			if err == nil {
-				r.ensureProjectParser(iwc.ctx, iwc.instance.ID, ctrl)
+				r.ensureProjectParser(iwc.ctx, iwc.instanceID, ctrl)
 
 				r.mu.Lock()
 				iwc.controller = ctrl
@@ -354,7 +441,7 @@ func (r *registryCache) restartController(iwc *instanceWithController) {
 				close(iwc.readyCh)
 				r.mu.Unlock()
 
-				r.logger.Info("controller ready", zap.String("instance_id", iwc.instance.ID))
+				iwc.logger.Debug("controller ready")
 
 				err = ctrl.Run(iwc.ctx)
 			}
@@ -362,20 +449,20 @@ func (r *registryCache) restartController(iwc *instanceWithController) {
 			iwc.cancel() // Always ensure cleanup
 
 			r.mu.Lock()
-			attrs := []zapcore.Field{zap.String("instance_id", iwc.instance.ID), zap.Error(err), zap.Bool("reopen", iwc.reopen), zap.Bool("called_run", iwc.ready)}
+			attrs := []zapcore.Field{zap.Error(err), zap.Bool("reopen", iwc.reopen), zap.Bool("called_run", iwc.ready)}
 			r.mu.Unlock()
 
 			if errors.Is(err, iwc.ctx.Err()) {
-				r.logger.Warn("controller stopped", attrs...)
+				iwc.logger.Debug("controller stopped", attrs...)
 			} else {
-				r.logger.Error("controller failed", attrs...)
+				iwc.logger.Error("controller failed", attrs...)
 			}
 
 			// When an instance is edited, connector config may have changed.
 			// So we want to evict all open connections for that instance, but it's unsafe to do so while the controller is running.
 			// So this is the only place where we can do it safely.
 			if r.baseCtx.Err() == nil {
-				r.rt.evictInstanceConnections(iwc.instance.ID)
+				r.rt.evictInstanceConnections(iwc.instanceID)
 			}
 
 			r.mu.Lock()
@@ -433,4 +520,85 @@ func (r *registryCache) ensureProjectParser(ctx context.Context, instanceID stri
 	if err != nil {
 		r.logger.Error("could not create project parser", zap.Error(err), zap.String("instance_id", instanceID), observability.ZapCtx(ctx))
 	}
+}
+
+func (r *registryCache) emitHeartbeats() {
+	ticker := time.NewTicker(instanceHeartbeatInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			instances, err := r.list()
+			if err != nil {
+				r.logger.Error("failed to send instance heartbeat event, instance listing failed", zap.Error(err))
+				continue
+			}
+			for _, instance := range instances {
+				r.emitHeartbeatForInstance(instance)
+			}
+		case <-r.baseCtx.Done():
+			return
+		}
+	}
+}
+
+func (r *registryCache) emitHeartbeatForInstance(inst *drivers.Instance) {
+	dataDir, err := r.rt.storage.WithPrefix(inst.ID).DataDir()
+	if err != nil {
+		r.logger.Error("failed to send instance heartbeat event, could not get data directory", zap.String("instance_id", inst.ID), zap.Error(err))
+		return
+	}
+
+	// Add instance annotations as attributes to pass organization id, project id, etc.
+	attrs := instanceAnnotationsToAttribs(inst)
+	r.activity.RecordMetric(context.Background(), "data_dir_size_bytes", float64(sizeOfDir(dataDir)), attrs...)
+}
+
+// updateProjectConfig updates the project config for the given instance.
+// This does the same operation as ProjectParserReconciler's reconcileProjectConfig and is done before starting the controller
+// to ensure that when controller first starts, it doesn’t immediately restart due to changed variables
+func (r *registryCache) updateProjectConfig(iwc *instanceWithController) error {
+	repo, release, err := r.rt.Repo(iwc.ctx, iwc.instanceID)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	instance, err := r.get(iwc.instanceID)
+	if err != nil {
+		return err
+	}
+
+	p, err := rillv1.Parse(iwc.ctx, repo, iwc.instanceID, instance.Environment, instance.OLAPConnector)
+	if err != nil {
+		return err
+	}
+
+	if p.RillYAML == nil {
+		// Empty project
+		return nil
+	}
+
+	return r.rt.UpdateInstanceWithRillYAML(iwc.ctx, iwc.instanceID, p, false)
+}
+
+func sizeOfDir(path string) int64 {
+	var size int64
+	_ = fs.WalkDir(os.DirFS(path), ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+
+		f, err := d.Info()
+		if err != nil {
+			return err
+		}
+		size += f.Size()
+		return nil
+	})
+	return size
 }

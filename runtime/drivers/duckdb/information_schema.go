@@ -18,14 +18,21 @@ func (c *connection) InformationSchema() drivers.InformationSchema {
 	return &informationSchema{c: c}
 }
 
-func (i informationSchema) All(ctx context.Context) ([]*drivers.Table, error) {
+func (i informationSchema) All(ctx context.Context, like string) ([]*drivers.Table, error) {
 	conn, release, err := i.c.acquireMetaConn(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = release() }()
 
-	q := `
+	var likeClause string
+	var args []any
+	if like != "" {
+		likeClause = "and (t.table_name ilike ? or concat(t.table_catalog, '.', t.table_schema, '.', t.table_name) ilike ?)"
+		args = []any{like, like}
+	}
+
+	q := fmt.Sprintf(`
 		select
 			coalesce(t.table_catalog, current_database()) as "database",
 			t.table_schema as "schema",
@@ -36,12 +43,13 @@ func (i informationSchema) All(ctx context.Context) ([]*drivers.Table, error) {
 			array_agg(c.is_nullable = 'YES' order by c.ordinal_position) as "column_nullable"
 		from information_schema.tables t
 		join information_schema.columns c on t.table_schema = c.table_schema and t.table_name = c.table_name
-		where t.table_schema = 'main'
+		where database = current_database() and t.table_schema = current_schema()
+		%s
 		group by 1, 2, 3, 4
 		order by 1, 2, 3, 4
-	`
+	`, likeClause)
 
-	rows, err := conn.QueryxContext(ctx, q)
+	rows, err := conn.QueryxContext(ctx, q, args...)
 	if err != nil {
 		return nil, i.c.checkErr(err)
 	}
@@ -55,7 +63,7 @@ func (i informationSchema) All(ctx context.Context) ([]*drivers.Table, error) {
 	return tables, nil
 }
 
-func (i informationSchema) Lookup(ctx context.Context, name string) (*drivers.Table, error) {
+func (i informationSchema) Lookup(ctx context.Context, db, schema, name string) (*drivers.Table, error) {
 	conn, release, err := i.c.acquireMetaConn(ctx)
 	if err != nil {
 		return nil, err
@@ -73,7 +81,7 @@ func (i informationSchema) Lookup(ctx context.Context, name string) (*drivers.Ta
 			array_agg(c.is_nullable = 'YES' order by c.ordinal_position) as "column_nullable"
 		from information_schema.tables t
 		join information_schema.columns c on t.table_schema = c.table_schema and t.table_name = c.table_name
-		where t.table_schema = 'main' and lower(t.table_name) = lower(?)
+		where database = current_database() and t.table_schema = current_schema() and lower(t.table_name) = lower(?)
 		group by 1, 2, 3, 4
 		order by 1, 2, 3, 4
 	`
@@ -114,11 +122,13 @@ func (i informationSchema) scanTables(rows *sqlx.Rows) ([]*drivers.Table, error)
 		}
 
 		t := &drivers.Table{
-			Database:       database,
-			DatabaseSchema: schema,
-			Name:           name,
-			View:           tableType == "VIEW",
-			Schema:         &runtimev1.StructType{},
+			Database:                database,
+			DatabaseSchema:          schema,
+			IsDefaultDatabase:       true,
+			IsDefaultDatabaseSchema: true,
+			Name:                    name,
+			View:                    tableType == "VIEW",
+			Schema:                  &runtimev1.StructType{},
 		}
 
 		// should NEVER happen, but just to be safe
@@ -180,12 +190,16 @@ func databaseTypeToPB(dbt string, nullable bool) (*runtimev1.Type, error) {
 		t.Code = runtimev1.Type_CODE_FLOAT64
 	case "TIMESTAMP":
 		t.Code = runtimev1.Type_CODE_TIMESTAMP
+	case "TIMESTAMPTZ", "TIMESTAMP WITH TIME ZONE":
+		t.Code = runtimev1.Type_CODE_TIMESTAMP
 	case "DATE":
 		t.Code = runtimev1.Type_CODE_DATE
 	case "TIME":
 		t.Code = runtimev1.Type_CODE_TIME
+	case "TIME WITH TIME ZONE":
+		t.Code = runtimev1.Type_CODE_TIME
 	case "INTERVAL":
-		t.Code = runtimev1.Type_CODE_UNSPECIFIED // TODO - Consider adding interval type
+		t.Code = runtimev1.Type_CODE_INTERVAL
 	case "HUGEINT":
 		t.Code = runtimev1.Type_CODE_INT128
 	case "VARCHAR":
@@ -206,10 +220,6 @@ func databaseTypeToPB(dbt string, nullable bool) (*runtimev1.Type, error) {
 		t.Code = runtimev1.Type_CODE_JSON
 	case "CHAR":
 		t.Code = runtimev1.Type_CODE_STRING
-	case "TIMESTAMP WITH TIME ZONE":
-		t.Code = runtimev1.Type_CODE_TIMESTAMP
-	case "TIME WITH TIME ZONE":
-		t.Code = runtimev1.Type_CODE_TIME
 	case "NULL":
 		t.Code = runtimev1.Type_CODE_UNSPECIFIED
 	default:

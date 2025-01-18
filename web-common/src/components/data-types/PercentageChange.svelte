@@ -1,17 +1,27 @@
 <script lang="ts">
+  import type { NumberParts } from "@rilldata/web-common/lib/number-formatting/humanizer-types";
   import Base from "./Base.svelte";
   import { PERC_DIFF, isPercDiff } from "./type-utils";
-  import type { NumberParts } from "@rilldata/web-common/lib/number-formatting/humanizer-types";
   export let isNull = false;
   export let inTable = false;
   export let dark = false;
+  export let showPosSign = false;
+  export let color = "text-gray-900";
   export let customStyle = "";
-  export let value: number | undefined | null | NumberParts | PERC_DIFF;
+  export let value:
+    | string
+    | number
+    | undefined
+    | null
+    | NumberParts
+    | PERC_DIFF;
   export let tabularNumber = true;
+  export let assembled = true;
 
   let diffIsNegative = false;
   let intValue: string;
   let negSign = "";
+  let posSign = "";
   let approxSign = "";
   let suffix = "";
 
@@ -33,18 +43,24 @@
     // small negative change.
     //
     // Otherwise, we format the number as usual.
-    intValue = value.int;
+    let intPart = +value.int;
+    let fracPart = +value.frac / 10 ** value.frac.length;
+    intValue = Math.round(intPart + fracPart).toString();
+
     diffIsNegative = value?.neg === "-";
     negSign = diffIsNegative && !value?.approxZero ? "-" : "";
     approxSign = value?.approxZero ? "~" : "";
+    posSign = !diffIsNegative && !approxSign && showPosSign ? "+" : "";
     suffix = value?.suffix ?? "";
   } else if (typeof value === "number") {
     // FIXME: this seems to only come up in the tool tip,
     // for percentages in the dimension table,
     // but this whole thing is a mess and needs to be cleaned up.
 
+    diffIsNegative = value < 0;
     intValue = Math.round(100 * value).toString();
     approxSign = Math.abs(value) < 0.005 ? "~" : "";
+    posSign = !diffIsNegative && !approxSign && showPosSign ? "+" : "";
     negSign = "";
     suffix = "";
   }
@@ -52,17 +68,20 @@
 
 <Base
   {isNull}
+  {color}
   classes="{tabularNumber
     ? 'ui-copy-number'
-    : ''} font-normal {customStyle} {inTable && 'block text-right'}"
+    : ''} w-full {customStyle} {inTable && 'block text-right'}"
   {dark}
 >
   <slot name="value">
     {#if isNoData}
-      <span class="opacity-50 italic" style:font-size=".925em">no data</span>
-    {:else if value !== null}
+      <span class="text-gray-400">-</span>
+    {:else if value !== null && assembled}
       <span class:text-red-500={diffIsNegative}>
-        {approxSign}{negSign}{intValue}{suffix}<span class="opacity-50">%</span>
+        {approxSign}{negSign}{posSign}{intValue}{suffix}<span class="opacity-50"
+          >%</span
+        >
       </span>
     {/if}
   </slot>

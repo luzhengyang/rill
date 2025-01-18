@@ -2,9 +2,11 @@ package postgres
 
 import (
 	"context"
+	"errors"
 
 	"github.com/rilldata/rill/runtime/drivers"
 	"github.com/rilldata/rill/runtime/pkg/activity"
+	"github.com/rilldata/rill/runtime/storage"
 	"go.uber.org/zap"
 )
 
@@ -16,7 +18,13 @@ func init() {
 var spec = drivers.Spec{
 	DisplayName: "Postgres",
 	Description: "Connect to Postgres.",
-	SourceProperties: []drivers.PropertySchema{
+	ConfigProperties: []*drivers.PropertySpec{
+		{
+			Key:    "database_url",
+			Secret: true,
+		},
+	},
+	SourceProperties: []*drivers.PropertySpec{
 		{
 			Key:         "sql",
 			Type:        drivers.StringPropertyType,
@@ -27,33 +35,47 @@ var spec = drivers.Spec{
 		},
 		{
 			Key:         "database_url",
-			DisplayName: "Postgress Connection String",
 			Type:        drivers.StringPropertyType,
+			DisplayName: "Postgres Connection String",
 			Required:    false,
-			Href:        "https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNSTRING",
+			DocsURL:     "https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNSTRING",
 			Placeholder: "postgresql://postgres:postgres@localhost:5432/postgres",
 			Hint:        "Either set this or pass --env connector.postgres.database_url=... to rill start",
 		},
-	},
-	ConfigProperties: []drivers.PropertySchema{
 		{
-			Key:    "database_url",
-			Secret: true,
+			Key:         "name",
+			Type:        drivers.StringPropertyType,
+			DisplayName: "Source name",
+			Description: "The name of the source",
+			Placeholder: "my_new_source",
+			Required:    true,
 		},
 	},
+	ImplementsSQLStore: true,
 }
 
 type driver struct{}
 
-func (d driver) Open(config map[string]any, shared bool, client activity.Client, logger *zap.Logger) (drivers.Handle, error) {
+type ConfigProperties struct {
+	DatabaseURL string `mapstructure:"database_url"`
+	DSN         string `mapstructure:"dsn"`
+}
+
+func (c *ConfigProperties) ResolveDSN() string {
+	if c.DSN != "" {
+		return c.DSN
+	}
+	return c.DatabaseURL
+}
+
+func (d driver) Open(instanceID string, config map[string]any, st *storage.Client, ac *activity.Client, logger *zap.Logger) (drivers.Handle, error) {
+	if instanceID == "" {
+		return nil, errors.New("postgres driver can't be shared")
+	}
 	// actual db connection is opened during query
 	return &connection{
 		config: config,
 	}, nil
-}
-
-func (d driver) Drop(config map[string]any, logger *zap.Logger) error {
-	return drivers.ErrDropNotSupported
 }
 
 func (d driver) Spec() drivers.Spec {
@@ -70,6 +92,11 @@ func (d driver) TertiarySourceConnectors(ctx context.Context, src map[string]any
 
 type connection struct {
 	config map[string]any
+}
+
+// Ping implements drivers.Handle.
+func (c *connection) Ping(ctx context.Context) error {
+	return drivers.ErrNotImplemented
 }
 
 // Migrate implements drivers.Connection.
@@ -117,6 +144,11 @@ func (c *connection) AsAdmin(instanceID string) (drivers.AdminService, bool) {
 	return nil, false
 }
 
+// AsAI implements drivers.Handle.
+func (c *connection) AsAI(instanceID string) (drivers.AIService, bool) {
+	return nil, false
+}
+
 // AsOLAP implements drivers.Connection.
 func (c *connection) AsOLAP(instanceID string) (drivers.OLAPStore, bool) {
 	return nil, false
@@ -124,6 +156,16 @@ func (c *connection) AsOLAP(instanceID string) (drivers.OLAPStore, bool) {
 
 // AsObjectStore implements drivers.Connection.
 func (c *connection) AsObjectStore() (drivers.ObjectStore, bool) {
+	return nil, false
+}
+
+// AsModelExecutor implements drivers.Handle.
+func (c *connection) AsModelExecutor(instanceID string, opts *drivers.ModelExecutorOptions) (drivers.ModelExecutor, bool) {
+	return nil, false
+}
+
+// AsModelManager implements drivers.Handle.
+func (c *connection) AsModelManager(instanceID string) (drivers.ModelManager, bool) {
 	return nil, false
 }
 
@@ -137,7 +179,12 @@ func (c *connection) AsFileStore() (drivers.FileStore, bool) {
 	return nil, false
 }
 
-// AsSQLStore implements drivers.Connection.
-func (c *connection) AsSQLStore() (drivers.SQLStore, bool) {
-	return c, true
+// AsWarehouse implements drivers.Handle.
+func (c *connection) AsWarehouse() (drivers.Warehouse, bool) {
+	return nil, false
+}
+
+// AsNotifier implements drivers.Connection.
+func (c *connection) AsNotifier(properties map[string]any) (drivers.Notifier, error) {
+	return nil, drivers.ErrNotNotifier
 }

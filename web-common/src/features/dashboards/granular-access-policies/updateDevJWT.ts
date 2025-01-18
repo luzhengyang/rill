@@ -11,29 +11,41 @@ import { get } from "svelte/store";
 
 export async function updateDevJWT(
   queryClient: QueryClient,
-  mockUser: MockUser | null
+  mockUser: MockUser | null,
 ) {
   selectedMockUserStore.set(mockUser);
-  let jwt: string = null;
 
-  if (mockUser !== null) {
+  if (mockUser === null) {
+    selectedMockUserJWT.set(null);
+    runtime.update((runtimeState) => {
+      runtimeState.jwt = undefined;
+      return runtimeState;
+    });
+  } else {
     try {
-      const jwtResp = await runtimeServiceIssueDevJWT({
+      const { jwt } = await runtimeServiceIssueDevJWT({
         name: mockUser?.name ? mockUser.name : "Mock User",
         email: mockUser?.email,
         groups: mockUser?.groups ? mockUser.groups : [],
         admin: !!mockUser?.admin,
       });
-      jwt = jwtResp.jwt;
-    } catch (e) {
+
+      if (!jwt) throw new Error("No JWT returned");
+
+      selectedMockUserJWT.set(jwt);
+
+      runtime.update((runtimeState) => {
+        runtimeState.jwt = {
+          token: jwt,
+          receivedAt: Date.now(),
+          authContext: "mock",
+        };
+        return runtimeState;
+      });
+    } catch {
       // no-op
     }
   }
 
-  selectedMockUserJWT.set(jwt);
-  runtime.update((runtimeState) => {
-    runtimeState.jwt = jwt;
-    return runtimeState;
-  });
   return invalidateAllMetricsViews(queryClient, get(runtime).instanceId);
 }

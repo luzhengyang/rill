@@ -5,27 +5,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"strings"
 
 	runtimev1 "github.com/rilldata/rill/proto/gen/rill/runtime/v1"
 	"github.com/rilldata/rill/runtime"
-	"github.com/rilldata/rill/runtime/drivers"
+	"github.com/rilldata/rill/runtime/metricsview"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type MetricsViewTotals struct {
-	MetricsViewName    string                               `json:"metrics_view_name,omitempty"`
-	MeasureNames       []string                             `json:"measure_names,omitempty"`
-	InlineMeasures     []*runtimev1.InlineMeasure           `json:"inline_measures,omitempty"`
-	TimeStart          *timestamppb.Timestamp               `json:"time_start,omitempty"`
-	TimeEnd            *timestamppb.Timestamp               `json:"time_end,omitempty"`
-	Where              *runtimev1.Expression                `json:"where,omitempty"`
-	Having             *runtimev1.Expression                `json:"having,omitempty"`
-	MetricsView        *runtimev1.MetricsViewSpec           `json:"-"`
-	ResolvedMVSecurity *runtime.ResolvedMetricsViewSecurity `json:"security"`
-
-	// backwards compatibility
-	Filter *runtimev1.MetricsViewFilter `json:"filter,omitempty"`
+	MetricsViewName string                       `json:"metrics_view_name,omitempty"`
+	MeasureNames    []string                     `json:"measure_names,omitempty"`
+	TimeStart       *timestamppb.Timestamp       `json:"time_start,omitempty"`
+	TimeEnd         *timestamppb.Timestamp       `json:"time_end,omitempty"`
+	Where           *runtimev1.Expression        `json:"where,omitempty"`
+	WhereSQL        string                       `json:"where_sql,omitempty"`
+	Filter          *runtimev1.MetricsViewFilter `json:"filter,omitempty"` // backwards compatibility
+	SecurityClaims  *runtime.SecurityClaims      `json:"security_claims,omitempty"`
 
 	Result *runtimev1.MetricsViewTotalsResponse `json:"-"`
 }
@@ -63,44 +58,39 @@ func (q *MetricsViewTotals) UnmarshalResult(v any) error {
 }
 
 func (q *MetricsViewTotals) Resolve(ctx context.Context, rt *runtime.Runtime, instanceID string, priority int) error {
-	olap, release, err := rt.OLAP(ctx, instanceID)
+	mv, security, err := resolveMVAndSecurityFromAttributes(ctx, rt, instanceID, q.MetricsViewName, q.SecurityClaims)
 	if err != nil {
 		return err
 	}
-	defer release()
 
-	if olap.Dialect() != drivers.DialectDuckDB && olap.Dialect() != drivers.DialectDruid {
-		return fmt.Errorf("not available for dialect '%s'", olap.Dialect())
-	}
-
-	if q.MetricsView.TimeDimension == "" && (q.TimeStart != nil || q.TimeEnd != nil) {
-		return fmt.Errorf("metrics view '%s' does not have a time dimension", q.MetricsViewName)
-	}
-
-	// backwards compatibility
-	if q.Filter != nil {
-		if q.Where != nil {
-			return fmt.Errorf("both filter and where is provided")
-		}
-		q.Where = convertFilterToExpression(q.Filter)
-	}
-
-	ql, args, err := q.buildMetricsTotalsSQL(q.MetricsView, olap.Dialect(), q.ResolvedMVSecurity)
+	qry, err := q.rewriteToMetricsViewQuery(false)
 	if err != nil {
-		return fmt.Errorf("error building query: %w", err)
+		return fmt.Errorf("error rewriting to metrics query: %w", err)
 	}
 
-	meta, data, err := metricsQuery(ctx, olap, priority, ql, args)
+	e, err := metricsview.NewExecutor(ctx, rt, instanceID, mv.ValidSpec, mv.Streaming, security, priority)
+	if err != nil {
+		return err
+	}
+	defer e.Close()
+
+	res, err := e.Query(ctx, qry, nil)
+	if err != nil {
+		return err
+	}
+	defer res.Close()
+
+	data, err := rowsToData(res)
 	if err != nil {
 		return err
 	}
 
 	if len(data) == 0 {
-		return fmt.Errorf("no rows received from totals query")
+		return fmt.Errorf("no data returned")
 	}
 
 	q.Result = &runtimev1.MetricsViewTotalsResponse{
-		Meta: meta,
+		Meta: structTypeToMetricsViewColumn(res.Schema),
 		Data: data[0],
 	}
 
@@ -111,45 +101,38 @@ func (q *MetricsViewTotals) Export(ctx context.Context, rt *runtime.Runtime, ins
 	return ErrExportNotSupported
 }
 
-func (q *MetricsViewTotals) buildMetricsTotalsSQL(mv *runtimev1.MetricsViewSpec, dialect drivers.Dialect, policy *runtime.ResolvedMetricsViewSecurity) (string, []any, error) {
-	ms, err := resolveMeasures(mv, q.InlineMeasures, q.MeasureNames)
-	if err != nil {
-		return "", nil, err
+func (q *MetricsViewTotals) rewriteToMetricsViewQuery(exporting bool) (*metricsview.Query, error) {
+	qry := &metricsview.Query{MetricsView: q.MetricsViewName}
+
+	for _, m := range q.MeasureNames {
+		qry.Measures = append(qry.Measures, metricsview.Measure{Name: m})
 	}
 
-	selectCols := []string{}
-	for _, m := range ms {
-		expr := fmt.Sprintf(`%s as "%s"`, m.Expression, m.Name)
-		selectCols = append(selectCols, expr)
-	}
-
-	whereClause := "1=1"
-	args := []any{}
-	if mv.TimeDimension != "" {
+	if q.TimeStart != nil || q.TimeEnd != nil {
+		res := &metricsview.TimeRange{}
 		if q.TimeStart != nil {
-			whereClause += fmt.Sprintf(" AND %s >= ?", safeName(mv.TimeDimension))
-			args = append(args, q.TimeStart.AsTime())
+			res.Start = q.TimeStart.AsTime()
 		}
 		if q.TimeEnd != nil {
-			whereClause += fmt.Sprintf(" AND %s < ?", safeName(mv.TimeDimension))
-			args = append(args, q.TimeEnd.AsTime())
+			res.End = q.TimeEnd.AsTime()
 		}
+		qry.TimeRange = res
 	}
 
-	if q.Where != nil {
-		clause, clauseArgs, err := buildExpression(mv, q.Where, nil, dialect)
-		if err != nil {
-			return "", nil, err
+	if q.Filter != nil { // Backwards compatibility
+		if q.Where != nil {
+			return nil, fmt.Errorf("both filter and where is provided")
 		}
-		whereClause += " AND " + clause
-		args = append(args, clauseArgs...)
+		q.Where = convertFilterToExpression(q.Filter)
 	}
 
-	sql := fmt.Sprintf(
-		"SELECT %s FROM %q WHERE %s",
-		strings.Join(selectCols, ", "),
-		mv.Table,
-		whereClause,
-	)
-	return sql, args, nil
+	var err error
+	qry.Where, err = metricViewExpression(q.Where, q.WhereSQL)
+	if err != nil {
+		return nil, fmt.Errorf("error converting where clause: %w", err)
+	}
+
+	qry.UseDisplayNames = exporting
+
+	return qry, nil
 }

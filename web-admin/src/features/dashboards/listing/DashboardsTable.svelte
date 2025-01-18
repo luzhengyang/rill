@@ -1,20 +1,21 @@
 <script lang="ts">
-  import Spinner from "@rilldata/web-common/features/entity-management/Spinner.svelte";
-  import { EntityStatus } from "@rilldata/web-common/features/entity-management/types";
+  import ResourceHeader from "@rilldata/web-admin/components/table/ResourceHeader.svelte";
+  import ExploreIcon from "@rilldata/web-common/components/icons/ExploreIcon.svelte";
+  import DelayedSpinner from "@rilldata/web-common/features/entity-management/DelayedSpinner.svelte";
   import { runtime } from "@rilldata/web-common/runtime-client/runtime-store";
-  import { flexRender } from "@tanstack/svelte-table";
+  import { flexRender, type Row } from "@tanstack/svelte-table";
+  import { createEventDispatcher } from "svelte";
   import Table from "../../../components/table/Table.svelte";
-  import DashboardsError from "./DashboardsError.svelte";
   import DashboardsTableCompositeCell from "./DashboardsTableCompositeCell.svelte";
-  import DashboardsTableEmpty from "./DashboardsTableEmpty.svelte";
-  import DashboardsTableHeader from "./DashboardsTableHeader.svelte";
-  import NoDashboardsCTA from "./NoDashboardsCTA.svelte";
-  import { DashboardResource, useDashboardsV2 } from "./selectors";
+  import { useDashboardsV2, type DashboardResource } from "./selectors";
+  import NoResourceCTA from "@rilldata/web-admin/features/projects/NoResourceCTA.svelte";
+  import ResourceError from "@rilldata/web-admin/features/projects/ResourceError.svelte";
 
-  export let organization: string;
-  export let project: string;
+  export let isEmbedded = false;
 
-  $: dashboards = useDashboardsV2($runtime.instanceId);
+  $: ({ instanceId } = $runtime);
+
+  $: dashboards = useDashboardsV2(instanceId);
 
   /**
    * Table column definitions.
@@ -29,21 +30,41 @@
   const columns = [
     {
       id: "composite",
-      cell: ({ row }) =>
-        flexRender(DashboardsTableCompositeCell, {
-          organization: organization,
-          project: project,
-          name: row.original.resource.meta.name.name,
-          title: row.original.resource.metricsView.spec.title,
-          lastRefreshed: row.original.refreshedOn,
-          description: row.original.resource.metricsView.spec.description,
-          error: row.original.resource.meta.reconcileError,
-        }),
+      cell: ({ row }) => {
+        const dashboardResource = row.original as DashboardResource;
+        const resource = dashboardResource.resource;
+        const refreshedOn = dashboardResource.refreshedOn;
+        const name = resource.meta.name.name;
+
+        // If not a Metrics Explorer, it's a Custom Dashboard.
+        const isMetricsExplorer = !!resource?.explore;
+        const title = isMetricsExplorer
+          ? resource.explore.spec.displayName
+          : resource.canvas.spec.displayName;
+        const description = isMetricsExplorer
+          ? resource.explore.spec.description
+          : "";
+
+        return flexRender(DashboardsTableCompositeCell, {
+          name,
+          title,
+          lastRefreshed: refreshedOn,
+          description,
+          error: resource.meta.reconcileError,
+          isMetricsExplorer,
+          isEmbedded,
+        });
+      },
     },
     {
       id: "title",
-      accessorFn: (row: DashboardResource) =>
-        row.resource.metricsView.spec.title,
+      accessorFn: (row: DashboardResource) => {
+        const resource = row.resource;
+        const isMetricsExplorer = !!resource?.explore;
+        return isMetricsExplorer
+          ? resource.explore.spec.displayName
+          : resource.canvas.spec.displayName;
+      },
     },
     {
       id: "name",
@@ -55,8 +76,11 @@
     },
     {
       id: "description",
-      accessorFn: (row: DashboardResource) =>
-        row.resource.metricsView.spec.description,
+      accessorFn: (row: DashboardResource) => {
+        const resource = row.resource;
+        const isMetricsExplorer = !!resource?.explore;
+        return isMetricsExplorer ? resource.explore.spec.description : "";
+      },
     },
   ];
 
@@ -66,21 +90,37 @@
     lastRefreshed: false,
     description: false,
   };
+
+  const dispatch = createEventDispatcher();
+
+  function handleClickRow(e: CustomEvent<Row<DashboardResource>>) {
+    dispatch("select-resource", e.detail.original.resource.meta.name);
+  }
 </script>
 
 {#if $dashboards.isLoading}
   <div class="m-auto mt-20">
-    <Spinner status={EntityStatus.Running} size="24px" />
+    <DelayedSpinner isLoading={$dashboards.isLoading} size="24px" />
   </div>
 {:else if $dashboards.isError}
-  <DashboardsError />
+  <ResourceError kind="dashboard" />
 {:else if $dashboards.isSuccess}
-  {#if $dashboards.data.length === 0}
-    <NoDashboardsCTA />
+  {#if !$dashboards.data.length}
+    <NoResourceCTA kind="dashboard">
+      <svelte:fragment>
+        Learn how to deploy a dashboard in our
+        <a href="https://docs.rilldata.com/" target="_blank">docs</a>
+      </svelte:fragment>
+    </NoResourceCTA>
   {:else}
-    <Table data={$dashboards?.data} {columns} {columnVisibility}>
-      <DashboardsTableHeader slot="header" />
-      <DashboardsTableEmpty slot="empty" />
+    <Table
+      kind="dashboard"
+      data={$dashboards?.data}
+      {columns}
+      {columnVisibility}
+      on:click-row={handleClickRow}
+    >
+      <ResourceHeader kind="dashboard" icon={ExploreIcon} slot="header" />
     </Table>
   {/if}
 {/if}

@@ -28,18 +28,6 @@ func filterCount(m *runtimev1.Expression) int {
 	return c
 }
 
-func marshalInlineMeasure(ms []*runtimev1.InlineMeasure) []string {
-	if len(ms) == 0 {
-		return make([]string, 0)
-	}
-
-	names := make([]string, len(ms))
-	for i := 0; i < len(ms); i++ {
-		names[i] = ms[i].Name
-	}
-	return nil
-}
-
 func marshalMetricsViewAggregationDimension(ms []*runtimev1.MetricsViewAggregationDimension) []string {
 	if len(ms) == 0 {
 		return make([]string, 0)
@@ -49,7 +37,7 @@ func marshalMetricsViewAggregationDimension(ms []*runtimev1.MetricsViewAggregati
 	for i := 0; i < len(ms); i++ {
 		names[i] = ms[i].Name
 	}
-	return nil
+	return names
 }
 
 func marshalMetricsViewAggregationMeasures(ms []*runtimev1.MetricsViewAggregationMeasure) []string {
@@ -61,7 +49,7 @@ func marshalMetricsViewAggregationMeasures(ms []*runtimev1.MetricsViewAggregatio
 	for i := 0; i < len(ms); i++ {
 		names[i] = ms[i].Name
 	}
-	return nil
+	return names
 }
 
 func marshalMetricsViewAggregationSort(ms []*runtimev1.MetricsViewAggregationSort) []string {
@@ -73,7 +61,7 @@ func marshalMetricsViewAggregationSort(ms []*runtimev1.MetricsViewAggregationSor
 	for i := 0; i < len(ms); i++ {
 		names[i] = ms[i].Name
 	}
-	return nil
+	return names
 }
 
 func marshalMetricsViewComparisonSort(ms []*runtimev1.MetricsViewComparisonSort) []string {
@@ -85,7 +73,7 @@ func marshalMetricsViewComparisonSort(ms []*runtimev1.MetricsViewComparisonSort)
 	for i := 0; i < len(ms); i++ {
 		names[i] = ms[i].Name
 	}
-	return nil
+	return names
 }
 
 func marshalMetricsViewSort(ms []*runtimev1.MetricsViewSort) []string {
@@ -97,7 +85,7 @@ func marshalMetricsViewSort(ms []*runtimev1.MetricsViewSort) []string {
 	for i := 0; i < len(ms); i++ {
 		names[i] = ms[i].Name
 	}
-	return nil
+	return names
 }
 
 func marshalColumnTimeSeriesRequestBasicMeasure(m []*runtimev1.ColumnTimeSeriesRequest_BasicMeasure) []string {

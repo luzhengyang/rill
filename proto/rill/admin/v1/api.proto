@@ -5,6 +5,7 @@ import "google/api/annotations.proto";
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/struct.proto";
 import "rill/runtime/v1/export_format.proto";
+import "rill/runtime/v1/expression.proto";
 import "validate/validate.proto";
 
 service AdminService {
@@ -21,6 +22,13 @@ service AdminService {
   // GetOrganization returns information about a specific organization
   rpc GetOrganization(GetOrganizationRequest) returns (GetOrganizationResponse) {
     option (google.api.http) = {get: "/v1/organizations/{name}"};
+  }
+
+  // GetOrganizationNameForDomain finds the org name for a custom domain.
+  // If the application detects it is running on a non-default domain, it can use this to find the org to present.
+  // It can be called without being authenticated.
+  rpc GetOrganizationNameForDomain(GetOrganizationNameForDomainRequest) returns (GetOrganizationNameForDomainResponse) {
+    option (google.api.http) = {get: "/v1/organization-for-domain/{domain}"};
   }
 
   // CreateOrganization creates a new organization
@@ -54,14 +62,14 @@ service AdminService {
     option (google.api.http) = {get: "/v1/organizations/{organization_name}/projects/{name}"};
   }
 
+  // GetProject returns information about a specific project
+  rpc GetProjectByID(GetProjectByIDRequest) returns (GetProjectByIDResponse) {
+    option (google.api.http) = {get: "/v1/projects/{id}"};
+  }
+
   // SearchProjectNames returns project names matching the pattern
   rpc SearchProjectNames(SearchProjectNamesRequest) returns (SearchProjectNamesResponse) {
     option (google.api.http) = {get: "/v1/superuser/projects/search"};
-  }
-
-  // GetProjectVariables returns project variables. NOTE: Get project API doesn't return variables.
-  rpc GetProjectVariables(GetProjectVariablesRequest) returns (GetProjectVariablesResponse) {
-    option (google.api.http) = {get: "/v1/organizations/{organization_name}/projects/{name}/variables"};
   }
 
   // CreateProject creates a new project
@@ -85,15 +93,41 @@ service AdminService {
     };
   }
 
-  // UpdateProjectVariables updates variables for a project. NOTE: Update project API doesn't update variables.
+  // GetProjectVariables returns project variables.
+  rpc GetProjectVariables(GetProjectVariablesRequest) returns (GetProjectVariablesResponse) {
+    option (google.api.http) = {get: "/v1/organizations/{organization}/projects/{project}/variables"};
+  }
+  
+  // UpdateProjectVariables updates variables for a project.
   rpc UpdateProjectVariables(UpdateProjectVariablesRequest) returns (UpdateProjectVariablesResponse) {
     option (google.api.http) = {
-      put: "/v1/organizations/{organization_name}/projects/{name}/variables",
+      put: "/v1/organizations/{organization}/projects/{project}/variables",
+      body: "*"
+    };
+  }  
+
+  // CreateAsset returns a one time signed URL using which any asset can be uploaded.
+  rpc CreateAsset(CreateAssetRequest) returns (CreateAssetResponse) {
+    option (google.api.http) = {
+      post: "/v1/organizations/{organization_name}/create_asset",
       body: "*"
     };
   }
 
-  // TriggerReconcile triggers reconcile for the project's prod deployment
+  // RedeployProject creates a new production deployment for a project.
+  // If the project currently has another production deployment, the old deployment will be deprovisioned.
+  // This RPC can be used to redeploy a project that has been hibernated.
+  rpc RedeployProject(RedeployProjectRequest) returns (RedeployProjectResponse) {
+    option (google.api.http) = {post: "/v1/organizations/{organization}/projects/{project}/redeploy"};
+  }
+
+  // HibernateProject hibernates a project by tearing down its deployments.
+  rpc HibernateProject(HibernateProjectRequest) returns (HibernateProjectResponse) {
+    option (google.api.http) = {post: "/v1/organizations/{organization}/projects/{project}/hibernate"};
+  }
+
+  // TriggerReconcile triggers reconcile for the project's prod deployment.
+  // DEPRECATED: Clients should call CreateTrigger directly on the deployed runtime instead.
   rpc TriggerReconcile(TriggerReconcileRequest) returns (TriggerReconcileResponse) {
     option (google.api.http) = {
       post: "/v1/deployments/{deployment_id}/reconcile",
@@ -101,7 +135,8 @@ service AdminService {
     };
   }
 
-  // TriggerRefreshSources refresh the source for production deployment
+  // TriggerRefreshSources refresh the source for production deployment.
+  // DEPRECATED: Clients should call CreateTrigger directly on the deployed runtime instead.
   rpc TriggerRefreshSources(TriggerRefreshSourcesRequest) returns (TriggerRefreshSourcesResponse) {
     option (google.api.http) = {
       post: "/v1/deployments/{deployment_id}/refresh",
@@ -109,7 +144,8 @@ service AdminService {
     };
   }
 
-  // TriggerRedeploy creates a new deployment and teardown the old deployment for production deployment
+  // TriggerRedeploy is similar to RedeployProject.
+  // DEPRECATED: Use RedeployProject instead.
   rpc TriggerRedeploy(TriggerRedeployRequest) returns (TriggerRedeployResponse) {
     option (google.api.http) = {
       post: "/v1/projects/-/redeploy",
@@ -117,8 +153,17 @@ service AdminService {
     };
   }
 
-  // ListOrganizationMembers lists all the org members
-  rpc ListOrganizationMembers(ListOrganizationMembersRequest) returns (ListOrganizationMembersResponse) {
+  // Provision provisions a new resource for a deployment.
+  // If an existing resource matches the request, it will be returned without provisioning a new resource.
+  rpc Provision(ProvisionRequest) returns (ProvisionResponse) {
+    option (google.api.http) = {
+      post: "/v1/deployments/{deployment_id}/provision",
+      body: "*"
+    };
+  }
+
+  // ListOrganizationMemberUsers lists all the org members
+  rpc ListOrganizationMemberUsers(ListOrganizationMemberUsersRequest) returns (ListOrganizationMemberUsersResponse) {
     option (google.api.http) = {get: "/v1/organizations/{organization}/members"};
   }
 
@@ -127,16 +172,16 @@ service AdminService {
     option (google.api.http) = {get: "/v1/organizations/{organization}/invites"};
   }
 
-  // AddOrganizationMember lists all the org members
-  rpc AddOrganizationMember(AddOrganizationMemberRequest) returns (AddOrganizationMemberResponse) {
+  // AddOrganizationMemberUser adds a user to the organization
+  rpc AddOrganizationMemberUser(AddOrganizationMemberUserRequest) returns (AddOrganizationMemberUserResponse) {
     option (google.api.http) = {
       post: "/v1/organizations/{organization}/members",
       body: "*"
     };
   }
 
-  // RemoveOrganizationMember removes member from the organization
-  rpc RemoveOrganizationMember(RemoveOrganizationMemberRequest) returns (RemoveOrganizationMemberResponse) {
+  // RemoveOrganizationMemberUser removes member from the organization
+  rpc RemoveOrganizationMemberUser(RemoveOrganizationMemberUserRequest) returns (RemoveOrganizationMemberUserResponse) {
     option (google.api.http) = {delete: "/v1/organizations/{organization}/members/{email}"};
   }
 
@@ -145,16 +190,16 @@ service AdminService {
     option (google.api.http) = {delete: "/v1/organizations/{organization}/members/current"};
   }
 
-  // SetOrganizationMemberRole sets the role for the member
-  rpc SetOrganizationMemberRole(SetOrganizationMemberRoleRequest) returns (SetOrganizationMemberRoleResponse) {
+  // SetOrganizationMemberUserRole sets the role for the member
+  rpc SetOrganizationMemberUserRole(SetOrganizationMemberUserRoleRequest) returns (SetOrganizationMemberUserRoleResponse) {
     option (google.api.http) = {
       put: "/v1/organizations/{organization}/members/{email}",
       body: "*"
     };
   }
 
-  // ListProjectMembers lists all the project members
-  rpc ListProjectMembers(ListProjectMembersRequest) returns (ListProjectMembersResponse) {
+  // ListProjectMemberUsers lists all the project members
+  rpc ListProjectMemberUsers(ListProjectMemberUsersRequest) returns (ListProjectMemberUsersResponse) {
     option (google.api.http) = {get: "/v1/organizations/{organization}/projects/{project}/members"};
   }
 
@@ -163,25 +208,131 @@ service AdminService {
     option (google.api.http) = {get: "/v1/organizations/{organization}/projects/{project}/invites"};
   }
 
-  // AddProjectMember adds a member to the project
-  rpc AddProjectMember(AddProjectMemberRequest) returns (AddProjectMemberResponse) {
+  // AddProjectMemberUser adds a member to the project
+  rpc AddProjectMemberUser(AddProjectMemberUserRequest) returns (AddProjectMemberUserResponse) {
     option (google.api.http) = {
       post: "/v1/organizations/{organization}/projects/{project}/members",
       body: "*"
     };
   }
 
-  // RemoveProjectMember removes member from the project
-  rpc RemoveProjectMember(RemoveProjectMemberRequest) returns (RemoveProjectMemberResponse) {
+  // RemoveProjectMemberUser removes member from the project
+  rpc RemoveProjectMemberUser(RemoveProjectMemberUserRequest) returns (RemoveProjectMemberUserResponse) {
     option (google.api.http) = {delete: "/v1/organizations/{organization}/projects/{project}/members/{email}"};
   }
 
-  // SetProjectMemberRole sets the role for the member
-  rpc SetProjectMemberRole(SetProjectMemberRoleRequest) returns (SetProjectMemberRoleResponse) {
+  // SetProjectMemberUserRole sets the role for the member
+  rpc SetProjectMemberUserRole(SetProjectMemberUserRoleRequest) returns (SetProjectMemberUserRoleResponse) {
     option (google.api.http) = {
       put: "/v1/organizations/{organization}/projects/{project}/members/{email}",
       body: "*"
     };
+  }
+
+  // CreateUsergroup creates a user group in the organization
+  rpc CreateUsergroup(CreateUsergroupRequest) returns (CreateUsergroupResponse) {
+    option (google.api.http) = {
+      post: "/v1/organizations/{organization}/usergroups",
+      body: "*"
+    };
+  }
+
+  // GetUsergroups returns the user group details
+  rpc GetUsergroup(GetUsergroupRequest) returns (GetUsergroupResponse) {
+    option (google.api.http) = {get: "/v1/organizations/{organization}/usergroups/{usergroup}"};
+  }
+
+  // RenameUsergroup renames the user group
+  rpc RenameUsergroup(RenameUsergroupRequest) returns (RenameUsergroupResponse) {
+    option (google.api.http) = {
+      post: "/v1/organizations/{organization}/usergroups/{usergroup}",
+      body: "*"
+    };
+  }
+
+  // EditUsergroup renames the user group
+  rpc EditUsergroup(EditUsergroupRequest) returns (EditUsergroupResponse) {
+    option (google.api.http) = {
+      put: "/v1/organizations/{organization}/usergroups/{usergroup}",
+      body: "*"
+    };
+  }
+
+  // ListOrganizationMemberUsergroups lists the org's user groups
+  rpc ListOrganizationMemberUsergroups(ListOrganizationMemberUsergroupsRequest) returns (ListOrganizationMemberUsergroupsResponse) {
+    option (google.api.http) = {get: "/v1/organizations/{organization}/usergroups"};
+  }
+
+  // ListProjectMemberUsergroups lists the org's user groups
+  rpc ListProjectMemberUsergroups(ListProjectMemberUsergroupsRequest) returns (ListProjectMemberUsergroupsResponse) {
+    option (google.api.http) = {get: "/v1/organizations/{organization}/project/{project}/usergroups"};
+  }
+
+  // DeleteUsergroup deletes the user group from the organization
+  rpc DeleteUsergroup(DeleteUsergroupRequest) returns (DeleteUsergroupResponse) {
+    option (google.api.http) = {delete: "/v1/organizations/{organization}/usergroups/{usergroup}"};
+  }
+
+  // AddOrganizationMemberUsergroupRole adds the role for the user group
+  rpc AddOrganizationMemberUsergroup(AddOrganizationMemberUsergroupRequest) returns (AddOrganizationMemberUsergroupResponse) {
+    option (google.api.http) = {
+      post: "/v1/organizations/{organization}/usergroups/{usergroup}/role",
+      body: "*"
+    };
+  }
+
+  // SetOrganizationMemberUsergroupRole sets the role for the user group
+  rpc SetOrganizationMemberUsergroupRole(SetOrganizationMemberUsergroupRoleRequest) returns (SetOrganizationMemberUsergroupRoleResponse) {
+    option (google.api.http) = {
+      put: "/v1/organizations/{organization}/usergroups/{usergroup}/role",
+      body: "*"
+    };
+  }
+
+  // RemoveOrganizationMemberUsergroup revokes the organization-level role for the user group
+  rpc RemoveOrganizationMemberUsergroup(RemoveOrganizationMemberUsergroupRequest) returns (RemoveOrganizationMemberUsergroupResponse) {
+    option (google.api.http) = {delete: "/v1/organizations/{organization}/usergroups/{usergroup}/role"};
+  }
+
+  // AddProjectMemberUsergroupRole adds the role for the user group
+  rpc AddProjectMemberUsergroup(AddProjectMemberUsergroupRequest) returns (AddProjectMemberUsergroupResponse) {
+    option (google.api.http) = {
+      post: "/v1/organizations/{organization}/projects/{project}/usergroups/{usergroup}/roles",
+      body: "*"
+    };
+  }
+
+  // SetProjectMemberUsergroupRole sets the role for the user group
+  rpc SetProjectMemberUsergroupRole(SetProjectMemberUsergroupRoleRequest) returns (SetProjectMemberUsergroupRoleResponse) {
+    option (google.api.http) = {
+      put: "/v1/organizations/{organization}/projects/{project}/usergroups/{usergroup}/roles",
+      body: "*"
+    };
+  }
+
+  // RemoveProjectMemberUsergroup revokes the project-level role for the user group
+  rpc RemoveProjectMemberUsergroup(RemoveProjectMemberUsergroupRequest) returns (RemoveProjectMemberUsergroupResponse) {
+    option (google.api.http) = {
+      delete: "/v1/organizations/{organization}/projects/{project}/usergroups/{usergroup}/roles",
+    };
+  }
+
+  // AddUsergroupMemberUser adds a member to the user group
+  rpc AddUsergroupMemberUser(AddUsergroupMemberUserRequest) returns (AddUsergroupMemberUserResponse) {
+    option (google.api.http) = {
+      put: "/v1/organizations/{organization}/usergroups/{usergroup}/members/{email}",
+      body: "*"
+    };
+  }
+
+  // ListUsergroupMemberUsers lists all the user group members
+  rpc ListUsergroupMemberUsers(ListUsergroupMemberUsersRequest) returns (ListUsergroupMemberUsersResponse) {
+    option (google.api.http) = {get: "/v1/organizations/{organization}/usergroups/{usergroup}/members"};
+  }
+
+  // RemoveUsergroupMemberUser removes member from the user group
+  rpc RemoveUsergroupMemberUser(RemoveUsergroupMemberUserRequest) returns (RemoveUsergroupMemberUserResponse) {
+    option (google.api.http) = {delete: "/v1/organizations/{organization}/usergroups/{usergroup}/members/{email}"};
   }
 
   // GetCurrentUser returns the currently authenticated user (if any)
@@ -210,9 +361,37 @@ service AdminService {
     option (google.api.http) = {get: "/v1/github/repositories"};
   }
 
-  // GetGitCredentials returns credentials and other details for a project's Git repository.
-  rpc GetGitCredentials(GetGitCredentialsRequest) returns (GetGitCredentialsResponse) {
-    option (google.api.http) = {get: "/v1/organizations/{organization}/projects/{project}/git-credentials"};
+  // GetGithubUserStatus returns info about a Github user account based on the caller's installations.
+  // If we don't have access to user's personal account tokens or it is expired, instructions for granting access are returned.
+  rpc GetGithubUserStatus(GetGithubUserStatusRequest) returns (GetGithubUserStatusResponse) {
+    option (google.api.http) = {get: "/v1/github/user"};
+  }
+
+  rpc ListGithubUserRepos(ListGithubUserReposRequest) returns (ListGithubUserReposResponse) {
+    option (google.api.http) = {get: "/v1/github/user/repositories"};
+  }
+
+  // Connects a rill managed project to github.
+  // Replaces the contents of the remote repo with the contents of the project.
+  rpc ConnectProjectToGithub(ConnectProjectToGithubRequest) returns (ConnectProjectToGithubResponse) {
+    option (google.api.http) = {
+      post: "/v1/organizations/{organization}/projects/{project}/connect-to-github",
+      body: "*"
+    };
+  }
+
+  // Converts a project connected to github to a rill managed project.
+  // Uploads the current project to assets.
+  rpc UploadProjectAssets(UploadProjectAssetsRequest) returns (UploadProjectAssetsResponse) {
+    option (google.api.http) = {
+      post: "/v1/organizations/{organization}/projects/{project}/upload-assets",
+      body: "*"
+    };
+  }
+
+  // GetCloneCredentials returns credentials and other details for a project's Git repository or archive path if git repo is not configured.
+  rpc GetCloneCredentials(GetCloneCredentialsRequest) returns (GetCloneCredentialsResponse) {
+    option (google.api.http) = {get: "/v1/organizations/{organization}/projects/{project}/clone-credentials"};
   }
 
   // CreateWhitelistedDomain adds a domain to the whitelist
@@ -298,6 +477,82 @@ service AdminService {
     };
   }
 
+  // SudoUpdateOrganizationBillingCustomer update the billing customer for the organization
+  rpc SudoUpdateOrganizationBillingCustomer(SudoUpdateOrganizationBillingCustomerRequest) returns (SudoUpdateOrganizationBillingCustomerResponse) {
+    option (google.api.http) = {
+      patch: "/v1/superuser/organization/billing/customer_id",
+      body: "*"
+    };
+  }
+
+  // SudoExtendTrial extends the trial period for an organization
+  rpc SudoExtendTrial(SudoExtendTrialRequest) returns (SudoExtendTrialResponse) {
+    option (google.api.http) = {
+      post: "/v1/superuser/organization/trial/extend",
+      body: "*"
+    };
+  }
+
+  // SudoUpdateOrganizationCustomDomain updates the custom domain for an organization.
+  // It only updates the custom domain in the database, which is used to ensure correct redirects.
+  // The DNS records and ingress TLS must be configured separately.
+  rpc SudoUpdateOrganizationCustomDomain(SudoUpdateOrganizationCustomDomainRequest) returns (SudoUpdateOrganizationCustomDomainResponse) {
+    option (google.api.http) = {
+      patch: "/v1/superuser/organization/custom-domain",
+      body: "*"
+    };
+  }
+
+
+  // SudoUpdateAnnotations endpoint for superusers to update project annotations
+  rpc SudoUpdateAnnotations(SudoUpdateAnnotationsRequest) returns (SudoUpdateAnnotationsResponse) {
+    option (google.api.http) = {
+      patch: "/v1/superuser/projects/annotations",
+      body: "*"
+    };
+  }
+
+  // SudoIssueRuntimeManagerToken returns a runtime JWT with full manager permissions for a runtime.
+  rpc SudoIssueRuntimeManagerToken(SudoIssueRuntimeManagerTokenRequest) returns (SudoIssueRuntimeManagerTokenResponse) {
+    option (google.api.http) = {
+      post: "/v1/superuser/deployments/manager-token",
+      body: "*"
+    };
+  }
+
+  // SudoDeleteOrganizationBillingIssue deletes a billing issue of a type for the organization
+  rpc SudoDeleteOrganizationBillingIssue(SudoDeleteOrganizationBillingIssueRequest) returns (SudoDeleteOrganizationBillingIssueResponse) {
+    option (google.api.http) = {
+      delete: "/v1/superuser/organizations/{organization}/billing/issues/{type}",
+    };
+  }
+
+  // SudoTriggerBillingRepair triggers billing repair jobs for orgs that doesn't have billing info and puts them on trial
+  rpc SudoTriggerBillingRepair(SudoTriggerBillingRepairRequest) returns (SudoTriggerBillingRepairResponse) {
+    option (google.api.http) = {
+      post: "/v1/superuser/billing/repair",
+      body: "*"
+    };
+  }
+
+  // CreateProjectWhitelistedDomain adds a domain to the project's whitelisted
+  rpc CreateProjectWhitelistedDomain(CreateProjectWhitelistedDomainRequest) returns (CreateProjectWhitelistedDomainResponse) {
+    option (google.api.http) = {
+      post: "/v1/organizations/{organization}/projects/{project}/whitelisted",
+      body: "*"
+    };
+  }
+
+  // RemoveProjectWhitelistedDomain removes a domain from the project's whitelisted
+  rpc RemoveProjectWhitelistedDomain(RemoveProjectWhitelistedDomainRequest) returns (RemoveProjectWhitelistedDomainResponse) {
+    option (google.api.http) = {delete: "/v1/organizations/{organization}/projects/{project}/whitelisted/{domain}"};
+  }
+
+  // ListWhitelistedDomains lists all the whitelisted domains of the project
+  rpc ListProjectWhitelistedDomains(ListProjectWhitelistedDomainsRequest) returns (ListProjectWhitelistedDomainsResponse) {
+    option (google.api.http) = {get: "/v1/organizations/{organization}/projects/{project}/whitelisted"};
+  }
+
   // ListService returns all the services per organization
   rpc ListServices(ListServicesRequest) returns (ListServicesResponse) {
     option (google.api.http) = {get: "/v1/organizations/{organization_name}/services"};
@@ -323,7 +578,7 @@ service AdminService {
     option (google.api.http) = {delete: "/v1/organizations/{organization_name}/services/{name}"};
   }
 
-   // ListServiceAuthTokens lists all the service auth tokens
+  // ListServiceAuthTokens lists all the service auth tokens
   rpc ListServiceAuthTokens(ListServiceAuthTokensRequest) returns (ListServiceAuthTokensResponse) {
     option (google.api.http) = {get: "/v1/organizations/{organization_name}/services/{service_name}/tokens"};
   }
@@ -341,6 +596,29 @@ service AdminService {
     option (google.api.http) = {delete: "/v1/services/tokens/{token_id}"};
   }
 
+  // IssueMagicAuthToken creates a "magic" auth token that provides limited access to a specific filtered dashboard in a specific project.
+  rpc IssueMagicAuthToken(IssueMagicAuthTokenRequest) returns (IssueMagicAuthTokenResponse) {
+    option (google.api.http) = {
+      post: "/v1/organizations/{organization}/projects/{project}/tokens/magic",
+      body: "*"
+    };
+  }
+
+  // ListMagicAuthTokens lists all the magic auth tokens for a specific project.
+  rpc ListMagicAuthTokens(ListMagicAuthTokensRequest) returns (ListMagicAuthTokensResponse) {
+    option (google.api.http) = {get: "/v1/organizations/{organization}/projects/{project}/tokens/magic"};
+  }
+
+  // GetCurrentMagicAuthToken returns information about the current magic auth token.
+  rpc GetCurrentMagicAuthToken(GetCurrentMagicAuthTokenRequest) returns (GetCurrentMagicAuthTokenResponse) {
+    option (google.api.http) = {get: "/v1/magic-tokens/current"};
+  }
+
+  // RevokeMagicAuthToken revokes a magic auth token.
+  rpc RevokeMagicAuthToken(RevokeMagicAuthTokenRequest) returns (RevokeMagicAuthTokenResponse) {
+    option (google.api.http) = {delete: "/v1/magic-tokens/{token_id}"};
+  }
+
   // UpdateUserPreferences updates the preferences for the user
   rpc UpdateUserPreferences(UpdateUserPreferencesRequest) returns (UpdateUserPreferencesResponse) {
     option (google.api.http) = {
@@ -349,7 +627,7 @@ service AdminService {
     };
   }
 
-  // ListBookmarks lists all the bookmarks for the user
+  // ListBookmarks lists all the bookmarks for the user and global ones for dashboard
   rpc ListBookmarks(ListBookmarksRequest) returns (ListBookmarksResponse) {
     option (google.api.http) = {get: "/v1/users/bookmarks"};
   }
@@ -359,15 +637,23 @@ service AdminService {
     option (google.api.http) = {get: "/v1/users/bookmarks/{bookmark_id}"};
   }
 
-  // CreateBookmark creates a bookmark for the given user for the given project
+  // CreateBookmark creates a bookmark for the given user or for all users for the dashboard
   rpc CreateBookmark(CreateBookmarkRequest) returns (CreateBookmarkResponse) {
     option (google.api.http) = {
       post: "/v1/users/bookmarks",
       body: "*"
     };
   }
-  
-  // RemoveBookmark removes the bookmark for the given user for the given project
+
+  // UpdateBookmark updates a bookmark for the given user for the given project
+  rpc UpdateBookmark(UpdateBookmarkRequest) returns (UpdateBookmarkResponse) {
+    option (google.api.http) = {
+      put: "/v1/users/bookmarks",
+      body: "*"
+    };
+  }
+
+  // RemoveBookmark removes the bookmark for the given user or all users
   rpc RemoveBookmark(RemoveBookmarkRequest) returns (RemoveBookmarkResponse) {
     option (google.api.http) = {delete: "/v1/users/bookmarks/{bookmark_id}"};
   }
@@ -384,7 +670,18 @@ service AdminService {
 
   // GetReportMeta returns metadata for generating a report. It's currently only called by the report reconciler in the runtime.
   rpc GetReportMeta(GetReportMetaRequest) returns (GetReportMetaResponse) {
-    option (google.api.http) = {get: "/v1/projects/{project_id}/reports/meta"};
+    option (google.api.http) = {
+      post: "/v1/projects/{project_id}/reports/meta",
+      body: "*"
+    };
+  }
+
+  // GetAlertMeta returns metadata for checking an alert. It's currently only called by the alert reconciler in the runtime.
+  rpc GetAlertMeta(GetAlertMetaRequest) returns (GetAlertMetaResponse) {
+    option (google.api.http) = {
+      post: "/v1/projects/{project_id}/alerts/meta",
+      body: "*"
+    };
   }
 
   // CreateReport adds a virtual file for a report, triggers a reconcile, and waits for the report to be added to the runtime catalog
@@ -432,11 +729,124 @@ service AdminService {
     };
   }
 
-  rpc Telemetry(TelemetryRequest) returns (TelemetryResponse) {
+  // CreateAlert adds a virtual file for an alert, triggers a reconcile, and waits for the alert to be added to the runtime catalog
+  rpc CreateAlert(CreateAlertRequest) returns (CreateAlertResponse) {
     option (google.api.http) = {
-      post: "/v1/telemetry",
+      post: "/v1/organizations/{organization}/projects/{project}/alerts",
       body: "*"
     };
+  }
+
+  // EditAlert edits a virtual file for a UI-managed alert, triggers a reconcile, and waits for the alert to be updated in the runtime
+  rpc EditAlert(EditAlertRequest) returns (EditAlertResponse) {
+    option (google.api.http) = {
+      put: "/v1/organizations/{organization}/projects/{project}/alerts/{name}",
+      body: "*"
+    };
+  }
+
+  // UnsubscribeAlert removes the calling user from a alert's recipients list
+  rpc UnsubscribeAlert(UnsubscribeAlertRequest) returns (UnsubscribeAlertResponse) {
+    option (google.api.http) = {
+      post: "/v1/organizations/{organization}/projects/{project}/alerts/{name}/unsubscribe",
+      body: "*"
+    };
+  }
+
+  // DeleteAlert deletes the virtual file for a UI-managed alert, triggers a reconcile, and waits for the alert to be deleted in the runtime
+  rpc DeleteAlert(DeleteAlertRequest) returns (DeleteAlertResponse) {
+    option (google.api.http) = {delete: "/v1/organizations/{organization}/projects/{project}/alerts/{name}"};
+  }
+
+  // GenerateAlertYAML generates YAML for an alert to be copied into a project's Git repository
+  rpc GenerateAlertYAML(GenerateAlertYAMLRequest) returns (GenerateAlertYAMLResponse) {
+    option (google.api.http) = {
+      post: "/v1/organizations/{organization}/projects/{project}/alerts/-/yaml",
+      body: "*"
+    };
+  }
+
+  // GenerateAlertYAML generates YAML for an alert to be copied into a project's Git repository
+  rpc GetAlertYAML(GetAlertYAMLRequest) returns (GetAlertYAMLResponse) {
+    option (google.api.http) = {
+      get: "/v1/organizations/{organization}/projects/{project}/alerts/{name}/yaml",
+    };
+  }
+
+  // GetBillingSubscription lists the subscription for the organization
+  rpc GetBillingSubscription(GetBillingSubscriptionRequest) returns (GetBillingSubscriptionResponse) {
+    option (google.api.http) = {get: "/v1/organizations/{organization}/billing/subscriptions"};
+  }
+
+  // UpdateBillingSubscription updates the billing plan for the organization
+  rpc UpdateBillingSubscription(UpdateBillingSubscriptionRequest) returns (UpdateBillingSubscriptionResponse) {
+    option (google.api.http) = {
+      patch: "/v1/organizations/{organization}/billing/subscriptions",
+      body: "*"
+    };
+  }
+
+  // CancelBillingSubscription cancels the billing subscription for the organization
+  rpc CancelBillingSubscription(CancelBillingSubscriptionRequest) returns (CancelBillingSubscriptionResponse) {
+    option (google.api.http) = {
+      delete: "/v1/organizations/{organization}/billing/subscriptions",
+    };
+  }
+
+  // RenewBillingSubscription renews the billing plan for the organization once cancelled
+  rpc RenewBillingSubscription(RenewBillingSubscriptionRequest) returns (RenewBillingSubscriptionResponse) {
+    option (google.api.http) = {
+      post: "/v1/organizations/{organization}/billing/subscriptions/renew",
+      body: "*"
+    };
+  }
+
+  // GetPaymentsPortalURL returns the URL for the billing session to collect payment method
+  rpc GetPaymentsPortalURL(GetPaymentsPortalURLRequest) returns (GetPaymentsPortalURLResponse) {
+    option (google.api.http) = {get: "/v1/organizations/{organization}/billing/payments/portal-url"};
+  }
+
+  // ListPublicBillingPlans lists all public billing plans
+  rpc ListPublicBillingPlans(ListPublicBillingPlansRequest) returns (ListPublicBillingPlansResponse) {
+    option (google.api.http) = {get: "/v1/billing/plans"};
+  }
+
+  // GetBillingProjectCredentials returns credentials for the configured cloud metrics project filtered by request organization
+  rpc GetBillingProjectCredentials(GetBillingProjectCredentialsRequest) returns (GetBillingProjectCredentialsResponse) {
+    option (google.api.http) = {
+      post: "/v1/billing/metrics-project-credentials",
+      body: "*"
+    };
+  }
+
+  rpc RequestProjectAccess(RequestProjectAccessRequest) returns (RequestProjectAccessResponse) {
+    option (google.api.http) = {
+      post: "/v1/organizations/{organization}/projects/{project}/request-access",
+      body: "*"
+    };
+  }
+
+  rpc GetProjectAccessRequest(GetProjectAccessRequestRequest) returns (GetProjectAccessRequestResponse) {
+    option (google.api.http) = {get: "/v1/project-access-request/{id}"};
+  }
+
+  rpc ApproveProjectAccess(ApproveProjectAccessRequest) returns (ApproveProjectAccessResponse) {
+    option (google.api.http) = {
+      post: "/v1/project-access-request/{id}/approve",
+      body: "*"
+    };
+  }
+
+  rpc DenyProjectAccess(DenyProjectAccessRequest) returns (DenyProjectAccessResponse) {
+    option (google.api.http) = {
+      post: "/v1/project-access-request/{id}/deny",
+      body: "*"
+    };
+  }
+
+  // ListOrganizationBillingIssues lists all the billing issues for the organization
+  rpc ListOrganizationBillingIssues(ListOrganizationBillingIssuesRequest) returns (ListOrganizationBillingIssuesResponse) {
+    option (google.api.http) = {get: "/v1/organizations/{organization}/billing/issues"};
   }
 }
 
@@ -466,6 +876,14 @@ message GetOrganizationResponse {
   OrganizationPermissions permissions = 2;
 }
 
+message GetOrganizationNameForDomainRequest {
+  string domain = 1 [(validate.rules).string.min_len = 1];
+}
+
+message GetOrganizationNameForDomainResponse {
+  string name = 1;
+}
+
 message CreateOrganizationRequest {
   string name = 2 [(validate.rules).string.min_len = 1];
   string description = 3;
@@ -485,6 +903,9 @@ message UpdateOrganizationRequest {
   string name = 1 [(validate.rules).string.min_len = 1];
   optional string description = 2;
   optional string new_name = 3;
+  optional string display_name = 5;
+  optional string logo_asset_id = 6;
+  optional string billing_email = 4 [(validate.rules).string.email = true];
 }
 
 message UpdateOrganizationResponse {
@@ -505,6 +926,8 @@ message ListProjectsForOrganizationResponse {
 message GetProjectRequest {
   string organization_name = 1;
   string name = 2;
+  uint32 access_token_ttl_seconds = 3;
+  bool issue_superuser_token = 4;
 }
 
 message GetProjectResponse {
@@ -514,8 +937,17 @@ message GetProjectResponse {
   ProjectPermissions project_permissions = 4;
 }
 
+message GetProjectByIDRequest {
+  string id = 1;
+}
+
+message GetProjectByIDResponse {
+  Project project = 1;
+}
+
 message SearchProjectNamesRequest {
   string name_pattern = 1;
+  map<string, string> annotations = 5;
   uint32 page_size = 2 [(validate.rules).uint32 = {ignore_empty: true, lte: 1000}];
   string page_token = 3;
 }
@@ -526,12 +958,61 @@ message SearchProjectNamesResponse {
 }
 
 message GetProjectVariablesRequest {
-  string organization_name = 1;
-  string name = 2;
+  // Organization the project belongs to.
+  string organization = 1 [(validate.rules).string.min_len = 1];
+  // Project to get variables for.
+  string project = 2 [(validate.rules).string.min_len = 1];
+  // Environment to get the variables for.
+  // If empty, only variables shared across all environments are returned.
+  string environment = 3;
+  // If true, return variable values for all environments.
+  // Can't be used together with the "environment" option.
+  bool for_all_environments = 4;
 }
 
 message GetProjectVariablesResponse {
-  map<string, string> variables = 1;
+  repeated ProjectVariable variables = 2;
+  // Deprecated: Populated for backwards compatibility.
+  // (Renamed from "variables" to "variables_map").
+  map<string, string> variables_map = 1;
+}
+
+message ProjectVariable {
+  // Internal ID.
+  string id = 1;
+  // Variable name (case insensitive).
+  string name = 2;
+  // Variable value.
+  string value = 3;
+  // Environment the variable is set for.
+  // If empty, the variable is shared for all environments.
+  string environment = 4;
+  // User ID that most recently updated the variable. May be empty.
+  string updated_by_user_id = 5;
+  // Timestamp when the variable was created.
+  google.protobuf.Timestamp created_on = 6;
+  // Timestamp when the variable was last updated.
+  google.protobuf.Timestamp updated_on = 7;
+}
+
+message UpdateProjectVariablesRequest {
+  // Organization the project belongs to.
+  string organization = 1 [(validate.rules).string.min_len = 1];
+  // Project to update variables for.
+  string project = 2 [(validate.rules).string.min_len = 1];
+  // Environment to set the variables for.
+  // If empty, the variable(s) will be used as defaults for all environments.
+  string environment = 4;
+  // New variable values.
+  // It is NOT NECESSARY to pass all variables, existing variables not included in the request will be left unchanged.
+  map<string, string> variables = 3;
+  // Variables to delete.
+  repeated string unset_variables = 5;
+}
+
+message UpdateProjectVariablesResponse {
+  // Variables that were created or updated by the request.
+  repeated ProjectVariable variables = 2;
 }
 
 message SearchProjectUsersRequest {
@@ -566,20 +1047,39 @@ message GetDeploymentCredentialsResponse {
   uint32 ttl_seconds = 4;
 }
 
+// GetIFrameRequest is the request payload for AdminService.GetIFrame.
 message GetIFrameRequest {
+  // Organization that owns the project to embed.
   string organization = 1;
+  // Project that has the resource(s) to embed.
   string project = 2;
+  // Branch to embed. If not set, the production branch is used.
   string branch = 3;
-  string kind = 4;
-  string resource = 5;
+  // TTL for the iframe's access token. If not set, defaults to 24 hours.
   uint32 ttl_seconds = 6;
-  string state = 7;
-  map<string, string> query = 8;
+  // User attributes to use for security policy evaluation.
   oneof for {
+    // If set, will use the attributes of the user with this ID.
     string user_id = 9;
+    // If set, will generate attributes corresponding to a user with this email.
     string user_email = 10 [(validate.rules).string.email = true];
+    // If set, will use the provided attributes outright.
     google.protobuf.Struct attributes = 11;
   }
+  // Type of resource to embed. If not set, defaults to "rill.runtime.v1.Explore".
+  string type = 14;
+  // Deprecated: Alias for `type`.
+  string kind = 4;
+  // Name of the resource to embed. This should identify a resource that is valid for embedding, such as a dashboard or component.
+  string resource = 5;
+  // Theme to use for the embedded resource.
+  string theme = 12;
+  // Navigation denotes whether navigation between different resources should be enabled in the embed.
+  bool navigation = 13;
+  // Blob containing UI state for rendering the initial embed. Not currently supported.
+  string state = 7;
+  // DEPRECATED: Additional parameters to set outright in the generated URL query.
+  map<string, string> query = 8;
 }
 
 message GetIFrameResponse {
@@ -631,14 +1131,18 @@ message CreateProjectRequest {
   string name = 2 [(validate.rules).string.min_len = 1];
   string description = 3;
   bool public = 4;
-  string region = 5;
+  string provisioner = 5;
   string prod_olap_driver = 6;
   string prod_olap_dsn = 7;
   int64 prod_slots = 8;
   string subpath = 12;
   string prod_branch = 9;
+  // github_url is set for projects whose project files are stored in github. This is set to a github repo url.
+  // Either github_url or archive_asset_id should be set.
   string github_url = 10;
-  map<string, string> variables = 11;
+  // archive_asset_id is set for projects whose project files are not stored in github but are managed by rill.
+  string archive_asset_id = 14;
+  string prod_version = 13;
 }
 
 message CreateProjectResponse {
@@ -650,7 +1154,9 @@ message DeleteProjectRequest {
   string name = 2;
 }
 
-message DeleteProjectResponse {}
+message DeleteProjectResponse {
+  string id = 1;
+}
 
 message UpdateProjectRequest {
   string organization_name = 1 [(validate.rules).string.min_len = 1];
@@ -659,25 +1165,48 @@ message UpdateProjectRequest {
   optional bool public = 4;
   optional string prod_branch = 5;
   optional string github_url = 6;
+  optional string subpath = 13;
+  optional string archive_asset_id = 12;
   optional int64 prod_slots = 7;
-  optional string region = 8;
+  optional string provisioner = 8;
   optional string new_name = 9;
   optional int64 prod_ttl_seconds = 10;
+  optional string prod_version = 11;
 }
 
 message UpdateProjectResponse {
   Project project = 1;
 }
 
-message UpdateProjectVariablesRequest {
+message CreateAssetRequest {
   string organization_name = 1 [(validate.rules).string.min_len = 1];
-  string name = 2 [(validate.rules).string.min_len = 1];
-  map<string, string> variables = 3;
+  string type = 2 [(validate.rules).string = {in: ["deploy", "image"]}];
+  string name = 3 [(validate.rules).string.min_len = 1]; // Eg. "rilldata__project_name"
+  string extension = 4; // Eg. ".tar.gz"
+  bool cacheable = 5;
+  int64 estimated_size_bytes = 6;
 }
 
-message UpdateProjectVariablesResponse {
-  map<string, string> variables = 1;
+message CreateAssetResponse {
+  string asset_id = 1;
+  string signed_url = 2;
+  map<string, string> signing_headers = 3;
 }
+
+message RedeployProjectRequest {
+  string organization = 1;
+  string project = 2;
+  bool superuser_force_access = 3;
+}
+
+message RedeployProjectResponse {}
+
+message HibernateProjectRequest {
+  string organization = 1;
+  string project = 2;
+}
+
+message HibernateProjectResponse {}
 
 message TriggerReconcileRequest {
   string deployment_id = 1;
@@ -702,14 +1231,31 @@ message TriggerRedeployRequest {
 
 message TriggerRedeployResponse {}
 
-message ListOrganizationMembersRequest {
+message ProvisionRequest {
+  // Deployment to provision a resource for.
+  // If it's blank and the request is made with a deployment access token, the deployment is inferred from the token.
+  string deployment_id = 1;
+  // Type of resource to provision.
+  string type = 2;
+  // Name of the resource to provision.
+  // It forms a unique key together with deployment and type, which is used to de-duplicate provision requests.
+  string name = 3;
+  // Arguments for the provisioner call.
+  google.protobuf.Struct args = 4;
+}
+
+message ProvisionResponse {
+  ProvisionerResource resource = 1;
+}
+
+message ListOrganizationMemberUsersRequest {
   string organization = 1;
   uint32 page_size = 2 [(validate.rules).uint32 = {ignore_empty: true, lte: 1000}];
   string page_token = 3;
 }
 
-message ListOrganizationMembersResponse {
-  repeated Member members = 1;
+message ListOrganizationMemberUsersResponse {
+  repeated MemberUser members = 1;
   string next_page_token = 2;
 }
 
@@ -724,23 +1270,24 @@ message ListOrganizationInvitesResponse {
   string next_page_token = 2;
 }
 
-message AddOrganizationMemberRequest {
+message AddOrganizationMemberUserRequest {
   string organization = 1 [(validate.rules).string.min_len = 1];
   string email = 2 [(validate.rules).string.email = true];
   string role = 3;
+  bool superuser_force_access = 4;
 }
 
-message AddOrganizationMemberResponse {
+message AddOrganizationMemberUserResponse {
   bool pending_signup = 1;
 }
 
-message RemoveOrganizationMemberRequest {
+message RemoveOrganizationMemberUserRequest {
   string organization = 1 [(validate.rules).string.min_len = 1];
   string email = 2 [(validate.rules).string.email = true];
   bool keep_project_roles = 3;
 }
 
-message RemoveOrganizationMemberResponse {}
+message RemoveOrganizationMemberUserResponse {}
 
 message LeaveOrganizationRequest {
   string organization = 1 [(validate.rules).string.min_len = 1];
@@ -748,13 +1295,13 @@ message LeaveOrganizationRequest {
 
 message LeaveOrganizationResponse {}
 
-message SetOrganizationMemberRoleRequest {
+message SetOrganizationMemberUserRoleRequest {
   string organization = 1 [(validate.rules).string.min_len = 1];
   string email = 2 [(validate.rules).string.email = true];
   string role = 3 [(validate.rules).string.min_len = 1];
 }
 
-message SetOrganizationMemberRoleResponse {}
+message SetOrganizationMemberUserRoleResponse {}
 
 message ListSuperusersRequest {}
 
@@ -790,36 +1337,96 @@ message SudoGetResourceResponse {
 }
 
 message SudoUpdateOrganizationQuotasRequest {
-  string org_name = 1;
-  optional uint32 projects = 2;
-  optional uint32 deployments = 3;
-  optional uint32 slots_total = 4;
-  optional uint32 slots_per_deployment = 5;
-  optional uint32 outstanding_invites = 6;
+  string organization = 1;
+  optional int32 projects = 2;
+  optional int32 deployments = 3;
+  optional int32 slots_total = 4;
+  optional int32 slots_per_deployment = 5;
+  optional int32 outstanding_invites = 6;
+  optional int64 storage_limit_bytes_per_deployment = 7;
 }
 
 message SudoUpdateOrganizationQuotasResponse {
   Organization organization = 1;
 }
 
+message SudoUpdateOrganizationBillingCustomerRequest {
+  string organization = 1;
+  optional string billing_customer_id = 2;
+  optional string payment_customer_id = 3;
+}
+
+message SudoUpdateOrganizationBillingCustomerResponse {
+  Organization organization = 1;
+  Subscription subscription = 2;
+}
+
+message SudoExtendTrialRequest {
+  string organization = 1 [(validate.rules).string.min_len = 1];
+  int32 days = 2 [(validate.rules).int32 = {gt: 0, lte: 30}];
+}
+
+message SudoExtendTrialResponse {
+  google.protobuf.Timestamp trial_end = 1;
+}
+
+message SudoUpdateOrganizationCustomDomainRequest {
+  string name = 1;
+  string custom_domain = 2;
+}
+
+message SudoUpdateOrganizationCustomDomainResponse {
+  Organization organization = 1;
+}
+
 message SudoUpdateUserQuotasRequest {
   string email = 1;
-  optional uint32 singleuser_orgs = 2;
+  optional int32 singleuser_orgs = 2;
+  optional int32 trial_orgs = 3;
 }
 
 message SudoUpdateUserQuotasResponse {
   User user = 1;
 }
 
-message ListProjectMembersRequest {
+message SudoUpdateAnnotationsRequest {
+  string organization = 1 [(validate.rules).string.min_len = 1];
+  string project = 2 [(validate.rules).string.min_len = 1];
+  map<string, string> annotations = 3;
+}
+
+message SudoUpdateAnnotationsResponse {
+  Project project = 1;
+}
+
+message SudoIssueRuntimeManagerTokenRequest {
+  string host = 1;
+}
+
+message SudoIssueRuntimeManagerTokenResponse {
+  string token = 1;
+}
+
+message SudoDeleteOrganizationBillingIssueRequest {
+  string organization = 1;
+  BillingIssueType type = 2;
+}
+
+message SudoDeleteOrganizationBillingIssueResponse {}
+
+message SudoTriggerBillingRepairRequest {}
+
+message SudoTriggerBillingRepairResponse {}
+
+message ListProjectMemberUsersRequest {
   string organization = 1 [(validate.rules).string.min_len = 1];
   string project = 2 [(validate.rules).string.min_len = 1];
   uint32 page_size = 3 [(validate.rules).uint32 = {ignore_empty: true, lte: 1000}];
   string page_token = 4 ;
 }
 
-message ListProjectMembersResponse {
-  repeated Member members = 1;
+message ListProjectMemberUsersResponse {
+  repeated MemberUser members = 1;
   string next_page_token = 2;
 }
 
@@ -835,33 +1442,175 @@ message ListProjectInvitesResponse {
   string next_page_token = 2;
 }
 
-message AddProjectMemberRequest {
+message AddProjectMemberUserRequest {
   string organization = 1 [(validate.rules).string.min_len = 1];
   string project = 2 [(validate.rules).string.min_len = 1];
   string email = 3 [(validate.rules).string.email = true];
   string role = 4 [(validate.rules).string.min_len = 1];
 }
 
-message AddProjectMemberResponse {
+message AddProjectMemberUserResponse {
   bool pending_signup = 1;
 }
 
-message RemoveProjectMemberRequest {
+message RemoveProjectMemberUserRequest {
   string organization = 1 [(validate.rules).string.min_len = 1];
   string project = 2 [(validate.rules).string.min_len = 1];
   string email = 3 [(validate.rules).string.email = true];
 }
 
-message RemoveProjectMemberResponse {}
+message RemoveProjectMemberUserResponse {}
 
-message SetProjectMemberRoleRequest {
+message SetProjectMemberUserRoleRequest {
   string organization = 1 [(validate.rules).string.min_len = 1];
   string project = 2 [(validate.rules).string.min_len = 1];
   string email = 3 [(validate.rules).string.email = true];
   string role = 4 [(validate.rules).string.min_len = 1];
 }
 
-message SetProjectMemberRoleResponse {}
+message SetProjectMemberUserRoleResponse {}
+
+message CreateUsergroupRequest {
+  string organization = 1 [(validate.rules).string.min_len = 1];
+  string name = 2 [(validate.rules).string.min_len = 1];
+}
+
+message CreateUsergroupResponse {}
+
+message GetUsergroupRequest {
+  string organization = 1 [(validate.rules).string.min_len = 1];
+  string usergroup = 2 [(validate.rules).string.min_len = 1];
+  uint32 page_size = 3 [(validate.rules).uint32 = {ignore_empty: true, lte: 1000}];
+  string page_token = 4;
+}
+
+message GetUsergroupResponse {
+  Usergroup usergroup = 1;
+  string next_page_token = 2;
+}
+
+message RenameUsergroupRequest {
+  string organization = 1 [(validate.rules).string.min_len = 1];
+  string usergroup = 2 [(validate.rules).string.min_len = 1];
+  string name = 3 [(validate.rules).string.min_len = 1];
+}
+
+message RenameUsergroupResponse {}
+
+message EditUsergroupRequest {
+  string organization = 1 [(validate.rules).string.min_len = 1];
+  string usergroup = 2 [(validate.rules).string.min_len = 1];
+  string description = 3;
+}
+
+message EditUsergroupResponse {}
+
+message ListOrganizationMemberUsergroupsRequest {
+  string organization = 1 [(validate.rules).string.min_len = 1];
+  uint32 page_size = 2 [(validate.rules).uint32 = {ignore_empty: true, lte: 1000}];
+  string page_token = 3;
+}
+
+message ListOrganizationMemberUsergroupsResponse {
+  repeated MemberUsergroup members = 1;
+  string next_page_token = 2;
+}
+
+message ListProjectMemberUsergroupsRequest {
+  string organization = 1 [(validate.rules).string.min_len = 1];
+  string project = 2 [(validate.rules).string.min_len = 1];
+  uint32 page_size = 3 [(validate.rules).uint32 = {ignore_empty: true, lte: 1000}];
+  string page_token = 4;
+}
+
+message ListProjectMemberUsergroupsResponse {
+  repeated MemberUsergroup members = 1;
+  string next_page_token = 2;
+}
+
+message DeleteUsergroupRequest {
+  string organization = 1 [(validate.rules).string.min_len = 1];
+  string usergroup = 2 [(validate.rules).string.min_len = 1];
+}
+
+message DeleteUsergroupResponse {}
+
+message AddOrganizationMemberUsergroupRequest {
+  string organization = 1 [(validate.rules).string.min_len = 1];
+  string usergroup = 2 [(validate.rules).string.min_len = 1];
+  string role = 3 [(validate.rules).string.min_len = 1];
+}
+
+message AddOrganizationMemberUsergroupResponse {}
+
+message SetOrganizationMemberUsergroupRoleRequest {
+  string organization = 1 [(validate.rules).string.min_len = 1];
+  string usergroup = 2 [(validate.rules).string.min_len = 1];
+  string role = 3 [(validate.rules).string.min_len = 1];
+}
+
+message SetOrganizationMemberUsergroupRoleResponse {}
+
+message RemoveOrganizationMemberUsergroupRequest {
+  string organization = 1 [(validate.rules).string.min_len = 1];
+  string usergroup = 2 [(validate.rules).string.min_len = 1];
+}
+
+message RemoveOrganizationMemberUsergroupResponse {}
+
+message AddProjectMemberUsergroupRequest {
+  string organization = 1 [(validate.rules).string.min_len = 1];
+  string project = 2 [(validate.rules).string.min_len = 1];
+  string usergroup = 3 [(validate.rules).string.min_len = 1];
+  string role = 4 [(validate.rules).string.min_len = 1];
+}
+
+message AddProjectMemberUsergroupResponse {}
+
+message SetProjectMemberUsergroupRoleRequest {
+  string organization = 1 [(validate.rules).string.min_len = 1];
+  string project = 2 [(validate.rules).string.min_len = 1];
+  string usergroup = 3 [(validate.rules).string.min_len = 1];
+  string role = 4 [(validate.rules).string.min_len = 1];
+}
+
+message SetProjectMemberUsergroupRoleResponse {}
+
+message RemoveProjectMemberUsergroupRequest {
+  string organization = 1 [(validate.rules).string.min_len = 1];
+  string project = 2 [(validate.rules).string.min_len = 1];
+  string usergroup = 3 [(validate.rules).string.min_len = 1];
+}
+
+message RemoveProjectMemberUsergroupResponse {}
+
+message AddUsergroupMemberUserRequest {
+  string organization = 1 [(validate.rules).string.min_len = 1];
+  string usergroup = 2 [(validate.rules).string.min_len = 1];
+  string email = 3 [(validate.rules).string.email = true];
+}
+
+message AddUsergroupMemberUserResponse {}
+
+message ListUsergroupMemberUsersRequest {
+  string organization = 1 [(validate.rules).string.min_len = 1];
+  string usergroup = 2 [(validate.rules).string.min_len = 1];
+  uint32 page_size = 3 [(validate.rules).uint32 = {ignore_empty: true, lte: 1000}];
+  string page_token = 4;
+}
+
+message ListUsergroupMemberUsersResponse {
+  repeated MemberUser members = 1;
+  string next_page_token = 2;
+}
+
+message RemoveUsergroupMemberUserRequest {
+  string organization = 1 [(validate.rules).string.min_len = 1];
+  string usergroup = 2 [(validate.rules).string.min_len = 1];
+  string email = 3 [(validate.rules).string.email = true];
+}
+
+message RemoveUsergroupMemberUserResponse {}
 
 message GetCurrentUserRequest {}
 
@@ -883,42 +1632,59 @@ message UserPreferences {
 }
 
 message UpdateUserPreferencesRequest {
-    UserPreferences preferences = 1;
+  UserPreferences preferences = 1;
 }
 
 message UpdateUserPreferencesResponse {
-    UserPreferences preferences = 1;
+  UserPreferences preferences = 1;
 }
 
 message ListBookmarksRequest {
-    string project_id = 1;
+  string project_id = 1;
+  string resource_kind = 2;
+  string resource_name = 3;
 }
 
 message ListBookmarksResponse {
-    repeated Bookmark bookmarks = 1;
+  repeated Bookmark bookmarks = 1;
 }
 
 message GetBookmarkRequest {
-    string bookmark_id = 1;
+  string bookmark_id = 1;
 }
 
 message GetBookmarkResponse {
-    Bookmark bookmark = 1;
+  Bookmark bookmark = 1;
 }
 
 message CreateBookmarkRequest {
   string display_name = 1;
-  bytes data = 2;
-  string dashboard_name = 3;
-  string project_id = 4;
+  string description = 2;
+  bytes data = 3;
+  string resource_kind = 4;
+  string resource_name = 5;
+  string project_id = 6;
+  bool default = 7;
+  bool shared = 8;
 }
 
 message CreateBookmarkResponse {
   Bookmark bookmark = 1;
 }
 
+message UpdateBookmarkRequest {
+  string bookmark_id = 1;
+  string display_name = 2;
+  string description = 4;
+  bytes data = 3;
+  bool default = 5;
+  bool shared = 6;
+}
+
+message UpdateBookmarkResponse {}
+
 message RemoveBookmarkRequest {
-    string bookmark_id = 1;
+  string bookmark_id = 1;
 }
 
 message RemoveBookmarkResponse {}
@@ -973,6 +1739,58 @@ message ListServiceAuthTokensResponse {
   repeated ServiceToken tokens = 1;
 }
 
+message IssueMagicAuthTokenRequest {
+  // Organization that owns the project.
+  string organization = 1 [(validate.rules).string.min_len = 1];
+  // Project to create the magic auth token in.
+  string project = 2 [(validate.rules).string.min_len = 1];
+  // TTL for the token in minutes. Set to 0 for no expiry. Defaults to no expiry.
+  int64 ttl_minutes = 3;
+  // Type of resource to grant access to. Currently only supports "rill.runtime.v1.Explore".
+  string resource_type = 8;
+  // Name of the resource to grant access to.
+  string resource_name = 9;
+  // Optional filter to apply as a row filter in queries.
+  // This will be translated to a rill.runtime.v1.SecurityRuleRowFilter, which currently applies to metric views queries.
+  rill.runtime.v1.Expression filter = 5;
+  // Optional list of fields to limit access to. If empty, no field access rule will be added.
+  // This will be translated to a rill.runtime.v1.SecurityRuleFieldAccess, which currently applies to dimension and measure names for explores and metrics views.
+  repeated string fields = 6;
+  // Optional state to store with the token. Can be fetched with GetCurrentMagicAuthToken.
+  string state = 7;
+  // Optional display name to store with the token.
+  string display_name = 10;
+}
+
+message IssueMagicAuthTokenResponse {
+  string token = 1;
+  string url = 2;
+}
+
+message ListMagicAuthTokensRequest {
+  string organization = 1 [(validate.rules).string.min_len = 1];
+  string project = 2 [(validate.rules).string.min_len = 1];
+  uint32 page_size = 3 [(validate.rules).uint32 = {ignore_empty: true, lte: 1000}];
+  string page_token = 4;
+}
+
+message ListMagicAuthTokensResponse {
+  repeated MagicAuthToken tokens = 1;
+  string next_page_token = 2;
+}
+
+message GetCurrentMagicAuthTokenRequest {}
+
+message GetCurrentMagicAuthTokenResponse {
+  MagicAuthToken token = 1;
+}
+
+message RevokeMagicAuthTokenRequest {
+  string token_id = 1;
+}
+
+message RevokeMagicAuthTokenResponse {}
+
 message GetGithubRepoStatusRequest {
   string github_url = 1;
 }
@@ -983,17 +1801,69 @@ message GetGithubRepoStatusResponse {
   string default_branch = 3;
 }
 
-message GetGitCredentialsRequest {
+message GetGithubUserStatusRequest {}
+
+message GetGithubUserStatusResponse {
+  bool has_access = 1;
+  string grant_access_url = 2;
+  string access_token = 3;
+  string account = 4;
+  GithubPermission user_installation_permission = 6;
+  map<string, GithubPermission> organization_installation_permissions = 7;
+  // DEPRECATED: Use organization_installation_permissions instead.
+  repeated string organizations = 5 [deprecated = true];
+}
+
+message ListGithubUserReposRequest {}
+
+message ListGithubUserReposResponse {
+  message Repo {
+    string name = 1;
+    string owner = 2;
+    string description = 3;
+    string url = 4;
+    string default_branch = 5;
+  }
+  repeated Repo repos = 1;
+}
+
+message ConnectProjectToGithubRequest {
+  string organization = 1;
+  string project = 2;
+  string repo = 3;
+  string branch = 4;
+  string subpath = 5;
+  bool force = 6;
+}
+
+message ConnectProjectToGithubResponse {}
+
+message UploadProjectAssetsRequest {
+  string organization = 1;
+  string project = 2;
+}
+
+message UploadProjectAssetsResponse {}
+
+enum GithubPermission {
+  GITHUB_PERMISSION_UNSPECIFIED = 0;
+  GITHUB_PERMISSION_READ = 1;
+  GITHUB_PERMISSION_WRITE = 2;
+}
+
+message GetCloneCredentialsRequest {
   string organization = 1 [(validate.rules).string.min_len = 1];
   string project = 2 [(validate.rules).string.min_len = 1];
 }
 
-message GetGitCredentialsResponse {
-  string repo_url = 1;
-  string username = 2;
-  string password = 3;
-  string subpath = 4;
-  string prod_branch = 5;
+message GetCloneCredentialsResponse {
+  string git_repo_url = 1;
+  string git_username = 2;
+  string git_password = 3;
+  string git_subpath = 4;
+  string git_prod_branch = 5;
+  // either archive_download_url or git related details will be set
+  string archive_download_url = 6;
 }
 
 message CreateWhitelistedDomainRequest {
@@ -1019,6 +1889,32 @@ message ListWhitelistedDomainsResponse {
   repeated WhitelistedDomain domains = 1;
 }
 
+message CreateProjectWhitelistedDomainRequest {
+  string organization = 1 [(validate.rules).string.min_len = 1];
+  string project = 2 [(validate.rules).string.min_len = 1];
+  string domain = 3 [(validate.rules).string.min_len = 1];
+  string role = 4 [(validate.rules).string.min_len = 1];
+}
+
+message CreateProjectWhitelistedDomainResponse {}
+
+message RemoveProjectWhitelistedDomainRequest {
+  string organization = 1 [(validate.rules).string.min_len = 1];
+  string project = 2 [(validate.rules).string.min_len = 1];
+  string domain = 3 [(validate.rules).string.min_len = 1];
+}
+
+message RemoveProjectWhitelistedDomainResponse {}
+
+message ListProjectWhitelistedDomainsRequest {
+  string organization = 1 [(validate.rules).string.min_len = 1];
+  string project = 2 [(validate.rules).string.min_len = 1];
+}
+
+message ListProjectWhitelistedDomainsResponse {
+  repeated WhitelistedDomain domains = 1;
+}
+
 message GetRepoMetaRequest {
   string project_id = 1;
   string branch = 2;
@@ -1028,6 +1924,9 @@ message GetRepoMetaResponse {
   string git_url = 1;
   google.protobuf.Timestamp git_url_expires_on = 2;
   string git_subpath = 3;
+  // archive_download_url is set when repo is managed by Rill
+  // either archive_download_url or git related details will be set
+  string archive_download_url = 4;
 }
 
 message PullVirtualRepoRequest {
@@ -1046,13 +1945,37 @@ message GetReportMetaRequest {
   string project_id = 1;
   string branch = 2;
   string report = 3;
-  map<string, string> annotations = 4;
+  string owner_id = 5;
+  google.protobuf.Timestamp execution_time = 6;
+  repeated string email_recipients = 7;
+  reserved 4;
 }
 
 message GetReportMetaResponse {
+  message URLs {
+    string open_url = 1;
+    string export_url = 2;
+    string edit_url = 3;
+  }
+  URLs base_urls = 1;
+  map<string, URLs> recipient_urls = 2;
+}
+
+message GetAlertMetaRequest {
+  string project_id = 1;
+  string branch = 2;
+  string alert = 3;
+  map<string, string> annotations = 4;
+  oneof query_for {
+    string query_for_user_id = 5;
+    string query_for_user_email = 6;
+  }
+}
+
+message GetAlertMetaResponse {
   string open_url = 1;
-  string export_url = 2;
-  string edit_url = 3;
+  string edit_url = 2;
+  google.protobuf.Struct query_for_attributes = 3;
 }
 
 message CreateReportRequest {
@@ -1092,7 +2015,7 @@ message DeleteReportRequest {
 message DeleteReportResponse {
 }
 
-message TriggerReportRequest { 
+message TriggerReportRequest {
   string organization = 1;
   string project = 2;
   string name = 3;
@@ -1110,6 +2033,127 @@ message GenerateReportYAMLResponse {
   string yaml = 1;
 }
 
+message CreateAlertRequest {
+  string organization = 1;
+  string project = 2;
+  AlertOptions options = 3 [(validate.rules).message.required = true];
+}
+
+message CreateAlertResponse {
+  string name = 1;
+}
+
+message EditAlertRequest {
+  string organization = 1;
+  string project = 2;
+  string name = 3;
+  AlertOptions options = 4 [(validate.rules).message.required = true];
+}
+
+message EditAlertResponse {
+}
+
+message UnsubscribeAlertRequest {
+  string organization = 1;
+  string project = 2;
+  string name = 3;
+}
+
+message UnsubscribeAlertResponse {}
+
+message DeleteAlertRequest {
+  string organization = 1;
+  string project = 2;
+  string name = 3;
+}
+
+message DeleteAlertResponse {
+}
+
+message GenerateAlertYAMLRequest {
+  string organization = 1;
+  string project = 2;
+  AlertOptions options = 3 [(validate.rules).message.required = true];
+}
+
+message GenerateAlertYAMLResponse {
+  string yaml = 1;
+}
+
+message GetAlertYAMLRequest {
+  string organization = 1;
+  string project = 2;
+  string name = 3;
+}
+
+message GetAlertYAMLResponse {
+  string yaml = 1;
+}
+
+message GetBillingSubscriptionRequest {
+  string organization = 1 [(validate.rules).string.min_len = 1];
+}
+
+message GetBillingSubscriptionResponse {
+  Organization organization = 1;
+  Subscription subscription = 2;
+  string billing_portal_url = 3;
+}
+
+message UpdateBillingSubscriptionRequest {
+  string organization = 1 [(validate.rules).string.min_len = 1];
+  string plan_name = 2 [(validate.rules).string.min_len = 1];
+  bool superuser_force_access = 3;
+}
+
+message UpdateBillingSubscriptionResponse {
+  Organization organization = 1;
+  Subscription subscription = 2;
+}
+
+message CancelBillingSubscriptionRequest {
+  string organization = 1 [(validate.rules).string.min_len = 1];
+}
+
+message CancelBillingSubscriptionResponse {}
+
+message RenewBillingSubscriptionRequest {
+  string organization = 1 [(validate.rules).string.min_len = 1];
+  string plan_name = 2 [(validate.rules).string.min_len = 1];
+  bool superuser_force_access = 3;
+}
+
+message RenewBillingSubscriptionResponse {
+  Organization organization = 1;
+  Subscription subscription = 2;
+}
+
+message GetPaymentsPortalURLRequest {
+  string organization = 1 [(validate.rules).string.min_len = 1];
+  string return_url = 2 [(validate.rules).string.min_len = 1];
+}
+
+message GetPaymentsPortalURLResponse {
+  string url = 1;
+}
+
+message ListPublicBillingPlansRequest {}
+
+message ListPublicBillingPlansResponse {
+  repeated BillingPlan plans = 1;
+}
+
+message GetBillingProjectCredentialsRequest {
+  string organization = 1 [(validate.rules).string.min_len = 1];
+}
+
+message GetBillingProjectCredentialsResponse {
+  string runtime_host = 1;
+  string instance_id = 2;
+  string access_token = 3;
+  uint32 ttl_seconds = 4;
+}
+
 message TelemetryRequest {
   // Name passed to activity module's name arg
   string name = 1;
@@ -1120,6 +2164,42 @@ message TelemetryRequest {
 }
 
 message TelemetryResponse {}
+
+message RequestProjectAccessRequest {
+  string organization = 1;
+  string project = 2;
+}
+
+message RequestProjectAccessResponse {}
+
+message GetProjectAccessRequestRequest {
+  string id = 1;
+}
+
+message GetProjectAccessRequestResponse {
+  string email = 1;
+}
+
+message ApproveProjectAccessRequest {
+  string id = 1;
+  string role = 2;
+}
+
+message ApproveProjectAccessResponse {}
+
+message DenyProjectAccessRequest {
+  string id = 1;
+}
+
+message DenyProjectAccessResponse {}
+
+message ListOrganizationBillingIssuesRequest {
+  string organization = 1;
+}
+
+message ListOrganizationBillingIssuesResponse {
+  repeated BillingIssue issues = 1;
+}
 
 message User {
   string id = 1;
@@ -1143,22 +2223,40 @@ message Service {
 message Organization {
   string id = 1;
   string name = 2; // Globally unique
+  string display_name = 11;
   string description = 3;
+  string logo_url = 12;
+  string custom_domain = 10;
   OrganizationQuotas quotas = 4;
+  string billing_customer_id = 7;
+  string payment_customer_id = 8;
+  string billing_email = 9;
   google.protobuf.Timestamp created_on = 5;
   google.protobuf.Timestamp updated_on = 6;
 }
 
+message Subscription {
+  string id = 1;
+  BillingPlan plan = 2;
+  google.protobuf.Timestamp start_date = 3;
+  google.protobuf.Timestamp end_date = 4;
+  google.protobuf.Timestamp current_billing_cycle_start_date = 5;
+  google.protobuf.Timestamp current_billing_cycle_end_date = 6;
+  google.protobuf.Timestamp trial_end_date = 7;
+}
+
 message UserQuotas {
-  uint32 singleuser_orgs = 1;
+  int32 singleuser_orgs = 1;
+  int32 trial_orgs = 2;
 }
 
 message OrganizationQuotas {
-  uint32 projects = 1;
-  uint32 deployments = 2;
-  uint32 slots_total = 3;
-  uint32 slots_per_deployment = 4;
-  uint32 outstanding_invites = 5;
+  int32 projects = 1;
+  int32 deployments = 2;
+  int32 slots_total = 3;
+  int32 slots_per_deployment = 4;
+  int32 outstanding_invites = 5;
+  int64 storage_limit_bytes_per_deployment = 6;
 }
 
 message Project {
@@ -1168,16 +2266,20 @@ message Project {
   string org_name = 4;
   string description = 5;
   bool public = 6;
-  string region = 7;
+  string created_by_user_id = 22;
+  string provisioner = 7;
   string github_url = 8;
   string subpath = 17;
   string prod_branch = 9;
+  string archive_asset_id = 23;
   string prod_olap_driver = 10;
   string prod_olap_dsn = 11;
   int64 prod_slots = 12;
   string prod_deployment_id = 13;
-  string frontend_url = 16;
+  string frontend_url = 16; // Note: Does NOT incorporate the parent org's custom domain.
   int64 prod_ttl_seconds = 18;
+  map<string, string> annotations = 20;
+  string prod_version = 21;
   google.protobuf.Timestamp created_on = 14;
   google.protobuf.Timestamp updated_on = 15;
 }
@@ -1192,7 +2294,6 @@ enum DeploymentStatus {
 message Deployment {
   string id = 1;
   string project_id = 2;
-  int64 slots = 3;
   string branch = 4;
   string runtime_host = 5;
   string runtime_instance_id = 6;
@@ -1200,6 +2301,15 @@ message Deployment {
   string status_message = 8;
   google.protobuf.Timestamp created_on = 9;
   google.protobuf.Timestamp updated_on = 10;
+}
+
+message ProvisionerResource {
+  string id = 1;
+  string deployment_id = 2;
+  string type = 3;
+  string name = 4;
+  google.protobuf.Struct args = 5;
+  google.protobuf.Struct config = 6;
 }
 
 message OrganizationPermissions {
@@ -1221,16 +2331,25 @@ message ProjectPermissions {
   bool read_dev = 6;
   bool read_dev_status = 7;
   bool manage_dev = 8;
+  bool read_provisioner_resources = 19;
+  bool manage_provisioner_resources = 20;
   bool read_project_members = 9;
   bool manage_project_members = 10;
+  bool create_magic_auth_tokens = 15;
+  bool manage_magic_auth_tokens = 16;
   bool create_reports = 11;
   bool manage_reports = 12;
+  bool create_alerts = 13;
+  bool manage_alerts = 14;
+  bool create_bookmarks = 17;
+  bool manage_bookmarks = 18;
 }
 
-message Member {
+message MemberUser {
   string user_id = 1;
   string user_email = 3;
   string user_name = 2;
+  string user_photo_url = 7;
   string role_name = 4;
   google.protobuf.Timestamp created_on = 5;
   google.protobuf.Timestamp updated_on = 6;
@@ -1250,10 +2369,14 @@ message WhitelistedDomain {
 message Bookmark {
   string id = 1;
   string display_name = 2;
+  string description = 9;
   bytes data = 3;
-  string dashboard_name = 4;
+  string resource_kind = 10;
+  string resource_name = 4;
   string project_id = 5;
   string user_id = 6;
+  bool default = 11;
+  bool shared = 12;
   google.protobuf.Timestamp created_on = 7;
   google.protobuf.Timestamp updated_on = 8;
 }
@@ -1264,6 +2387,25 @@ message ServiceToken {
   google.protobuf.Timestamp expires_on = 3;
 }
 
+message MagicAuthToken {
+  string id = 1;
+  string project_id = 2;
+  string url = 13;
+  string token = 14;
+  google.protobuf.Timestamp created_on = 3;
+  google.protobuf.Timestamp expires_on = 4;
+  google.protobuf.Timestamp used_on = 5;
+  string created_by_user_id = 6;
+  string created_by_user_email = 7;
+  google.protobuf.Struct attributes = 8;
+  string resource_type = 15;
+  string resource_name = 9;
+  rill.runtime.v1.Expression filter = 10;
+  repeated string fields = 11;
+  string state = 12;
+  string display_name = 16;
+}
+
 message VirtualFile {
   string path = 1;
   bytes data = 2;
@@ -1272,13 +2414,157 @@ message VirtualFile {
 }
 
 message ReportOptions {
-  string title = 1;
+  string display_name = 1;
   string refresh_cron = 2;
   string refresh_time_zone = 9;
+  string interval_duration = 13;
   string query_name = 3;
   string query_args_json = 4;
   uint64 export_limit = 5;
   rill.runtime.v1.ExportFormat export_format = 6;
-  string open_project_subpath = 7;
-  repeated string recipients = 8;
+  repeated string email_recipients = 8;
+  repeated string slack_users = 10;
+  repeated string slack_channels = 11;
+  repeated string slack_webhooks = 12;
+  string web_open_path = 15; // Annotation for the subpath of <UI host>/org/project to open for the report.
+  string web_open_state = 14; // Annotation for the base64-encoded UI state to open for the report.
 }
+
+message AlertOptions {
+  string display_name = 1;
+  string interval_duration = 2;
+  string resolver = 13;
+  google.protobuf.Struct resolver_properties = 14;
+  // DEPRECATED: Use resolver and resolver_properties instead.
+  string query_name = 3;
+  // DEPRECATED: Use resolver and resolver_properties instead.
+  string query_args_json = 4;
+  string metrics_view_name = 5;
+  bool renotify = 6;
+  uint32 renotify_after_seconds = 7;
+  repeated string email_recipients = 8;
+  repeated string slack_users = 9;
+  repeated string slack_channels = 10;
+  repeated string slack_webhooks = 11;
+  string web_open_path = 15; // Annotation for the subpath of <UI host>/org/project to open for the report.
+  string web_open_state = 12; // Annotation for the base64-encoded UI state to open for the report.
+}
+
+enum BillingPlanType {
+  BILLING_PLAN_TYPE_UNSPECIFIED = 0;
+  BILLING_PLAN_TYPE_TRIAL = 1;
+  BILLING_PLAN_TYPE_TEAM = 2;
+  BILLING_PLAN_TYPE_MANAGED = 3;
+  BILLING_PLAN_TYPE_ENTERPRISE = 4;
+}
+
+message BillingPlan {
+  string id = 1;
+  string name = 2;
+  BillingPlanType plan_type = 9;
+  string display_name = 3;
+  string description = 4;
+  uint32 trial_period_days = 5;
+  bool default = 6;
+  Quotas quotas = 7;
+  bool public = 8;
+  // TODO expose pricing information
+}
+
+message Quotas {
+  string projects = 1;
+  string deployments = 2;
+  string slots_total = 3;
+  string slots_per_deployment = 4;
+  string outstanding_invites = 5;
+  string storage_limit_bytes_per_deployment = 6;
+}
+
+message Usergroup {
+  string group_id = 1;
+  string group_name = 2;
+  string group_description = 3;
+  google.protobuf.Timestamp created_on = 4;
+  google.protobuf.Timestamp updated_on = 5;
+}
+
+message MemberUsergroup {
+  string group_id = 1;
+  string group_name = 2;
+  string role_name = 3;
+  google.protobuf.Timestamp created_on = 4;
+  google.protobuf.Timestamp updated_on = 5;
+}
+
+enum BillingIssueType {
+  BILLING_ISSUE_TYPE_UNSPECIFIED = 0;
+  BILLING_ISSUE_TYPE_ON_TRIAL = 1;
+  BILLING_ISSUE_TYPE_TRIAL_ENDED = 2;
+  BILLING_ISSUE_TYPE_NO_PAYMENT_METHOD = 3;
+  BILLING_ISSUE_TYPE_NO_BILLABLE_ADDRESS = 4;
+  BILLING_ISSUE_TYPE_PAYMENT_FAILED = 5;
+  BILLING_ISSUE_TYPE_SUBSCRIPTION_CANCELLED = 6;
+  BILLING_ISSUE_TYPE_NEVER_SUBSCRIBED = 7;
+}
+
+enum BillingIssueLevel {
+  BILLING_ISSUE_LEVEL_UNSPECIFIED = 0;
+  BILLING_ISSUE_LEVEL_WARNING = 1;
+  BILLING_ISSUE_LEVEL_ERROR = 2;
+}
+
+message BillingIssue {
+  string organization = 1;
+  BillingIssueType type = 2;
+  BillingIssueLevel level = 3;
+  BillingIssueMetadata metadata = 4;
+  google.protobuf.Timestamp event_time = 5;
+  google.protobuf.Timestamp created_on = 6;
+}
+
+message BillingIssueMetadata {
+  oneof metadata {
+    BillingIssueMetadataOnTrial on_trial = 1;
+    BillingIssueMetadataTrialEnded trial_ended = 2;
+    BillingIssueMetadataNoPaymentMethod no_payment_method = 3;
+    BillingIssueMetadataNoBillableAddress no_billable_address = 4;
+    BillingIssueMetadataPaymentFailed payment_failed = 5;
+    BillingIssueMetadataSubscriptionCancelled subscription_cancelled = 6;
+    BillingIssueMetadataNeverSubscribed never_subscribed = 7;
+  }
+}
+
+message BillingIssueMetadataOnTrial {
+  google.protobuf.Timestamp end_date = 1;
+  google.protobuf.Timestamp grace_period_end_date = 2;
+}
+
+message BillingIssueMetadataTrialEnded {
+  google.protobuf.Timestamp end_date = 1;
+  google.protobuf.Timestamp grace_period_end_date = 2;
+}
+
+message BillingIssueMetadataNoPaymentMethod {}
+
+message BillingIssueMetadataNoBillableAddress {}
+
+message BillingIssueMetadataPaymentFailed {
+  repeated BillingIssueMetadataPaymentFailedMeta invoices = 1;
+}
+
+message BillingIssueMetadataPaymentFailedMeta {
+  string invoice_id = 1;
+  string invoice_number = 2;
+  string invoice_url = 3;
+  string amount_due = 4;
+  string currency = 5;
+  google.protobuf.Timestamp due_date = 6;
+  google.protobuf.Timestamp failed_on = 7;
+  google.protobuf.Timestamp grace_period_end_date = 8;
+}
+
+message BillingIssueMetadataSubscriptionCancelled {
+  google.protobuf.Timestamp end_date = 1;
+}
+
+message BillingIssueMetadataNeverSubscribed {}

@@ -203,9 +203,9 @@ with pivot_alias as (
 )
 select * from pivot_alias join unpivot_alias on pivot_alias.id=unpivot_alias.id`,
 			[]*TableRef{
-				{Name: "Users"},
-				{Name: "AdImpressions"},
 				{Name: "AdBids"},
+				{Name: "AdImpressions"},
+				{Name: "Users"},
 				{Name: "pivot_alias", LocalAlias: true},
 				{Name: "unpivot_alias", LocalAlias: true},
 			},
@@ -377,6 +377,11 @@ on publisher
 `,
 			`SELECT * FROM (SELECT * FROM AdBids WHERE (publisher IS NOT NULL)) UNPIVOT ("value" FOR "name" IN ('publisher'))`,
 		},
+		{
+			"percent sample",
+			`select * from read_parquet('data/sales_data_more_variability_aggregated.parquet') USING SAMPLE 10%`,
+			`SELECT * FROM sales_data_more_variability_aggregated USING SAMPLE 10% (System)`,
+		},
 	}
 
 	for _, tt := range sqlVariations {
@@ -433,7 +438,7 @@ with
 select col1 from tbl2 join tbl3 on tbl2.id = tbl3.id
 `,
 			[]string{"AB", "AI", "tbl2", "tbl3"},
-			`WITH tbl2 AS (SELECT col1 FROM AI AS a), tbl3 AS (SELECT col1 FROM AB AS i)SELECT col1 FROM tbl2 INNER JOIN tbl3 ON ((tbl2.id = tbl3.id))`,
+			`WITH tbl2 AS (SELECT col1 FROM AB AS a), tbl3 AS (SELECT col1 FROM AI AS i)SELECT col1 FROM tbl2 INNER JOIN tbl3 ON ((tbl2.id = tbl3.id))`,
 		},
 		{
 			"table references with CTEs and unions",
@@ -444,7 +449,7 @@ with
 select col1 from tbl2 union all select col1 from tbl3 union all select col1 from "s3://data/AdBid_July.csv"
 `,
 			[]string{"A_M", "A_J", "tbl2", "tbl3", "A_Jl"},
-			`WITH tbl2 AS (SELECT col1 FROM A_J AS a), tbl3 AS (SELECT col1 FROM A_M AS i)((SELECT col1 FROM tbl2) UNION ALL (SELECT col1 FROM tbl3)) UNION ALL (SELECT col1 FROM A_Jl)`,
+			`WITH tbl2 AS (SELECT col1 FROM A_M AS a), tbl3 AS (SELECT col1 FROM A_J AS i)((SELECT col1 FROM tbl2) UNION ALL (SELECT col1 FROM tbl3)) UNION ALL (SELECT col1 FROM A_Jl)`,
 		},
 	}
 

@@ -12,6 +12,7 @@ import (
 	runtimev1 "github.com/rilldata/rill/proto/gen/rill/runtime/v1"
 	"github.com/rilldata/rill/runtime"
 	"github.com/rilldata/rill/runtime/drivers"
+	"github.com/rilldata/rill/runtime/metricsview"
 	"github.com/rilldata/rill/runtime/pkg/duration"
 	"github.com/rilldata/rill/runtime/pkg/pbutil"
 	"github.com/rilldata/rill/runtime/pkg/timeutil"
@@ -20,23 +21,21 @@ import (
 )
 
 type MetricsViewTimeSeries struct {
-	MetricsViewName    string                               `json:"metrics_view_name,omitempty"`
-	MeasureNames       []string                             `json:"measure_names,omitempty"`
-	InlineMeasures     []*runtimev1.InlineMeasure           `json:"inline_measures,omitempty"`
-	TimeStart          *timestamppb.Timestamp               `json:"time_start,omitempty"`
-	TimeEnd            *timestamppb.Timestamp               `json:"time_end,omitempty"`
-	Limit              int64                                `json:"limit,omitempty"`
-	Offset             int64                                `json:"offset,omitempty"`
-	Sort               []*runtimev1.MetricsViewSort         `json:"sort,omitempty"`
-	Where              *runtimev1.Expression                `json:"where,omitempty"`
-	Having             *runtimev1.Expression                `json:"having,omitempty"`
-	TimeGranularity    runtimev1.TimeGrain                  `json:"time_granularity,omitempty"`
-	TimeZone           string                               `json:"time_zone,omitempty"`
-	MetricsView        *runtimev1.MetricsViewSpec           `json:"-"`
-	ResolvedMVSecurity *runtime.ResolvedMetricsViewSecurity `json:"security"`
-
-	// backwards compatibility
-	Filter *runtimev1.MetricsViewFilter `json:"filter,omitempty"`
+	MetricsViewName string                       `json:"metrics_view_name,omitempty"`
+	MeasureNames    []string                     `json:"measure_names,omitempty"`
+	TimeStart       *timestamppb.Timestamp       `json:"time_start,omitempty"`
+	TimeEnd         *timestamppb.Timestamp       `json:"time_end,omitempty"`
+	Limit           int64                        `json:"limit,omitempty"`
+	Offset          int64                        `json:"offset,omitempty"`
+	Sort            []*runtimev1.MetricsViewSort `json:"sort,omitempty"`
+	Where           *runtimev1.Expression        `json:"where,omitempty"`
+	WhereSQL        string                       `json:"where_sql,omitempty"`
+	Filter          *runtimev1.MetricsViewFilter `json:"filter,omitempty"` // backwards compatibility
+	Having          *runtimev1.Expression        `json:"having,omitempty"`
+	HavingSQL       string                       `json:"having_sql,omitempty"`
+	TimeGranularity runtimev1.TimeGrain          `json:"time_granularity,omitempty"`
+	TimeZone        string                       `json:"time_zone,omitempty"`
+	SecurityClaims  *runtime.SecurityClaims      `json:"security_claims,omitempty"`
 
 	Result *runtimev1.MetricsViewTimeSeriesResponse `json:"-"`
 }
@@ -74,15 +73,40 @@ func (q *MetricsViewTimeSeries) UnmarshalResult(v any) error {
 }
 
 func (q *MetricsViewTimeSeries) Resolve(ctx context.Context, rt *runtime.Runtime, instanceID string, priority int) error {
-	if q.MetricsView.TimeDimension == "" {
-		return fmt.Errorf("metrics view '%s' does not have a time dimension", q.MetricsViewName)
-	}
-
-	olap, release, err := rt.OLAP(ctx, instanceID)
+	mv, security, err := resolveMVAndSecurityFromAttributes(ctx, rt, instanceID, q.MetricsViewName, q.SecurityClaims)
 	if err != nil {
 		return err
 	}
-	defer release()
+
+	if mv.ValidSpec.TimeDimension == "" {
+		return fmt.Errorf("metrics view '%s' does not have a time dimension", q.MetricsViewName)
+	}
+
+	qry, err := q.rewriteToMetricsViewQuery(mv.ValidSpec.TimeDimension)
+	if err != nil {
+		return fmt.Errorf("error rewriting to metrics query: %w", err)
+	}
+
+	e, err := metricsview.NewExecutor(ctx, rt, instanceID, mv.ValidSpec, mv.Streaming, security, priority)
+	if err != nil {
+		return err
+	}
+	defer e.Close()
+
+	res, err := e.Query(ctx, qry, nil)
+	if err != nil {
+		return err
+	}
+	defer res.Close()
+
+	return q.populateResult(res, mv.ValidSpec.TimeDimension, mv.ValidSpec)
+}
+
+func (q *MetricsViewTimeSeries) Export(ctx context.Context, rt *runtime.Runtime, instanceID string, w io.Writer, opts *runtime.ExportOptions) error {
+	err := q.Resolve(ctx, rt, instanceID, opts.Priority)
+	if err != nil {
+		return err
+	}
 
 	ctrl, err := rt.Controller(ctx, instanceID)
 	if err != nil {
@@ -94,31 +118,42 @@ func (q *MetricsViewTimeSeries) Resolve(ctx context.Context, rt *runtime.Runtime
 		return err
 	}
 
-	// backwards compatibility
-	if q.Filter != nil {
-		if q.Where != nil {
-			return fmt.Errorf("both filter and where is provided")
+	spec := r.GetMetricsView().State.ValidSpec
+	if spec == nil {
+		return fmt.Errorf("metrics view spec is not valid")
+	}
+
+	if opts.PreWriteHook != nil {
+		err = opts.PreWriteHook(q.generateFilename())
+		if err != nil {
+			return err
 		}
-		q.Where = convertFilterToExpression(q.Filter)
 	}
 
-	mv := r.GetMetricsView().Spec
-	sql, tsAlias, args, err := q.buildMetricsTimeseriesSQL(olap, mv, q.ResolvedMVSecurity)
-	if err != nil {
-		return fmt.Errorf("error building query: %w", err)
+	tmp := make([]*structpb.Struct, 0, len(q.Result.Data))
+	meta := append([]*runtimev1.MetricsViewColumn{{
+		Name: spec.TimeDimension,
+	}}, q.Result.Meta...)
+	for _, dt := range q.Result.Data {
+		dt.Records.Fields[spec.TimeDimension] = structpb.NewStringValue(dt.Ts.AsTime().Format(time.RFC3339Nano))
+		tmp = append(tmp, dt.Records)
 	}
 
-	rows, err := olap.Execute(ctx, &drivers.Statement{
-		Query:            sql,
-		Args:             args,
-		Priority:         priority,
-		ExecutionTimeout: defaultExecutionTimeout,
-	})
-	if err != nil {
-		return err
+	switch opts.Format {
+	case runtimev1.ExportFormat_EXPORT_FORMAT_UNSPECIFIED:
+		return fmt.Errorf("unspecified format")
+	case runtimev1.ExportFormat_EXPORT_FORMAT_CSV:
+		return WriteCSV(meta, tmp, w)
+	case runtimev1.ExportFormat_EXPORT_FORMAT_XLSX:
+		return WriteXLSX(meta, tmp, w)
+	case runtimev1.ExportFormat_EXPORT_FORMAT_PARQUET:
+		return WriteParquet(meta, tmp, w)
 	}
-	defer rows.Close()
 
+	return nil
+}
+
+func (q *MetricsViewTimeSeries) populateResult(rows *drivers.Result, tsAlias string, mv *runtimev1.MetricsViewSpec) error {
 	// Omit the time value from the result schema
 	schema := rows.Schema
 	if schema != nil {
@@ -132,6 +167,7 @@ func (q *MetricsViewTimeSeries) Resolve(ctx context.Context, rt *runtime.Runtime
 
 	tz := time.UTC
 	if q.TimeZone != "" {
+		var err error
 		tz, err = time.LoadLocation(q.TimeZone)
 		if err != nil {
 			return fmt.Errorf("invalid timezone '%s': %w", q.TimeZone, err)
@@ -165,8 +201,16 @@ func (q *MetricsViewTimeSeries) Resolve(ctx context.Context, rt *runtime.Runtime
 		switch v := rowMap[tsAlias].(type) {
 		case time.Time:
 			t = v
+		case *time.Time:
+			if v != nil {
+				t = *v
+			}
+		case int64:
+			t = time.UnixMilli(v)
 		default:
-			panic(fmt.Sprintf("unexpected type for timestamp column: %T", v))
+			if v != nil {
+				panic(fmt.Sprintf("unexpected type for timestamp column: %T", v))
+			}
 		}
 		delete(rowMap, tsAlias)
 
@@ -210,230 +254,12 @@ func (q *MetricsViewTimeSeries) Resolve(ctx context.Context, rt *runtime.Runtime
 	return nil
 }
 
-func (q *MetricsViewTimeSeries) Export(ctx context.Context, rt *runtime.Runtime, instanceID string, w io.Writer, opts *runtime.ExportOptions) error {
-	err := q.Resolve(ctx, rt, instanceID, opts.Priority)
-	if err != nil {
-		return err
-	}
-
-	ctrl, err := rt.Controller(ctx, instanceID)
-	if err != nil {
-		return err
-	}
-
-	r, err := ctrl.Get(ctx, &runtimev1.ResourceName{Kind: runtime.ResourceKindMetricsView, Name: q.MetricsViewName}, false)
-	if err != nil {
-		return err
-	}
-
-	mv := r.GetMetricsView().Spec
-
-	if opts.PreWriteHook != nil {
-		err = opts.PreWriteHook(q.generateFilename(mv))
-		if err != nil {
-			return err
-		}
-	}
-
-	tmp := make([]*structpb.Struct, 0, len(q.Result.Data))
-	meta := append([]*runtimev1.MetricsViewColumn{{
-		Name: mv.TimeDimension,
-	}}, q.Result.Meta...)
-	for _, dt := range q.Result.Data {
-		dt.Records.Fields[mv.TimeDimension] = structpb.NewStringValue(dt.Ts.AsTime().Format(time.RFC3339Nano))
-		tmp = append(tmp, dt.Records)
-	}
-
-	switch opts.Format {
-	case runtimev1.ExportFormat_EXPORT_FORMAT_UNSPECIFIED:
-		return fmt.Errorf("unspecified format")
-	case runtimev1.ExportFormat_EXPORT_FORMAT_CSV:
-		return writeCSV(meta, tmp, w)
-	case runtimev1.ExportFormat_EXPORT_FORMAT_XLSX:
-		return writeXLSX(meta, tmp, w)
-	case runtimev1.ExportFormat_EXPORT_FORMAT_PARQUET:
-		return writeParquet(meta, tmp, w)
-	}
-
-	return nil
-}
-
-func (q *MetricsViewTimeSeries) generateFilename(mv *runtimev1.MetricsViewSpec) string {
+func (q *MetricsViewTimeSeries) generateFilename() string {
 	filename := strings.ReplaceAll(q.MetricsViewName, `"`, `_`)
-	if q.TimeStart != nil || q.TimeEnd != nil || q.Where != nil || q.Having != nil {
+	if q.TimeStart != nil || q.TimeEnd != nil || q.Where != nil || q.Having != nil || q.WhereSQL != "" || q.HavingSQL != "" {
 		filename += "_filtered"
 	}
 	return filename
-}
-
-func (q *MetricsViewTimeSeries) buildMetricsTimeseriesSQL(olap drivers.OLAPStore, mv *runtimev1.MetricsViewSpec, policy *runtime.ResolvedMetricsViewSecurity) (string, string, []any, error) {
-	ms, err := resolveMeasures(mv, q.InlineMeasures, q.MeasureNames)
-	if err != nil {
-		return "", "", nil, err
-	}
-
-	selectCols := []string{}
-	for _, m := range ms {
-		expr := fmt.Sprintf(`%s as "%s"`, m.Expression, m.Name)
-		selectCols = append(selectCols, expr)
-	}
-
-	whereClause := "1=1"
-	args := []any{}
-	if q.TimeStart != nil {
-		whereClause += fmt.Sprintf(" AND %s >= ?", safeName(mv.TimeDimension))
-		args = append(args, q.TimeStart.AsTime())
-	}
-	if q.TimeEnd != nil {
-		whereClause += fmt.Sprintf(" AND %s < ?", safeName(mv.TimeDimension))
-		args = append(args, q.TimeEnd.AsTime())
-	}
-
-	if q.Where != nil {
-		clause, clauseArgs, err := buildExpression(mv, q.Where, nil, olap.Dialect())
-		if err != nil {
-			return "", "", nil, err
-		}
-		whereClause += " AND " + clause
-		args = append(args, clauseArgs...)
-	}
-
-	havingClause := ""
-	if q.Having != nil {
-		clause, clauseArgs, err := buildExpression(mv, q.Having, nil, olap.Dialect())
-		if err != nil {
-			return "", "", nil, err
-		}
-		havingClause = " HAVING " + clause
-		args = append(args, clauseArgs...)
-	}
-
-	tsAlias := tempName("_ts_")
-	timezone := "UTC"
-	if q.TimeZone != "" {
-		timezone = q.TimeZone
-	}
-
-	var sql string
-	switch olap.Dialect() {
-	case drivers.DialectDuckDB:
-		sql = q.buildDuckDBSQL(mv, tsAlias, selectCols, whereClause, havingClause, timezone)
-	case drivers.DialectDruid:
-		args = append([]any{timezone}, args...)
-		sql = q.buildDruidSQL(args, mv, tsAlias, selectCols, whereClause, havingClause)
-	default:
-		return "", "", nil, fmt.Errorf("not available for dialect '%s'", olap.Dialect())
-	}
-
-	return sql, tsAlias, args, nil
-}
-
-func (q *MetricsViewTimeSeries) buildDruidSQL(args []any, mv *runtimev1.MetricsViewSpec, tsAlias string, selectCols []string, whereClause, havingClause string) string {
-	tsSpecifier := convertToDruidTimeFloorSpecifier(q.TimeGranularity)
-
-	timeClause := fmt.Sprintf("time_floor(%s, '%s', null, CAST(? AS VARCHAR))", safeName(mv.TimeDimension), tsSpecifier)
-	if q.TimeGranularity == runtimev1.TimeGrain_TIME_GRAIN_WEEK && mv.FirstDayOfWeek > 1 {
-		dayOffset := 8 - mv.FirstDayOfWeek
-		timeClause = fmt.Sprintf("time_shift(time_floor(time_shift(%[1]s, 'P1D', %[3]d), '%[2]s', null, CAST(? AS VARCHAR)), 'P1D', -%[3]d)", safeName(mv.TimeDimension), tsSpecifier, dayOffset)
-	} else if q.TimeGranularity == runtimev1.TimeGrain_TIME_GRAIN_YEAR && mv.FirstMonthOfYear > 1 {
-		monthOffset := 13 - mv.FirstMonthOfYear
-		timeClause = fmt.Sprintf("time_shift(time_floor(time_shift(%[1]s, 'P1M', %[3]d), '%[2]s', null, CAST(? AS VARCHAR)), 'P1M', -%[3]d)", safeName(mv.TimeDimension), tsSpecifier, monthOffset)
-	}
-
-	sql := fmt.Sprintf(
-		`SELECT %s AS %s, %s FROM %s WHERE %s GROUP BY 1 %s ORDER BY 1`,
-		timeClause,
-		tsAlias,
-		strings.Join(selectCols, ", "),
-		safeName(mv.Table),
-		whereClause,
-		havingClause,
-	)
-
-	return sql
-}
-
-func (q *MetricsViewTimeSeries) buildDuckDBSQL(mv *runtimev1.MetricsViewSpec, tsAlias string, selectCols []string, whereClause, havingClause, timezone string) string {
-	dateTruncSpecifier := convertToDateTruncSpecifier(q.TimeGranularity)
-
-	shift := "" // shift to accommodate FirstDayOfWeek or FirstMonthOfYear
-	if q.TimeGranularity == runtimev1.TimeGrain_TIME_GRAIN_WEEK && mv.FirstDayOfWeek > 1 {
-		offset := 8 - mv.FirstDayOfWeek
-		shift = fmt.Sprintf("%d DAY", offset)
-	} else if q.TimeGranularity == runtimev1.TimeGrain_TIME_GRAIN_YEAR && mv.FirstMonthOfYear > 1 {
-		offset := 13 - mv.FirstMonthOfYear
-		shift = fmt.Sprintf("%d MONTH", offset)
-	}
-
-	sql := ""
-	if shift == "" {
-		if q.TimeGranularity == runtimev1.TimeGrain_TIME_GRAIN_HOUR ||
-			q.TimeGranularity == runtimev1.TimeGrain_TIME_GRAIN_MINUTE ||
-			q.TimeGranularity == runtimev1.TimeGrain_TIME_GRAIN_SECOND {
-			sql = fmt.Sprintf(
-				`
-					SELECT
-						time_bucket(INTERVAL '1 %[1]s', %[2]s::TIMESTAMPTZ, '%[7]s') as %[3]s,
-						%[4]s
-					FROM %[5]s
-					WHERE %[6]s
-					GROUP BY 1
-					%[8]s
-					ORDER BY 1`,
-				dateTruncSpecifier,             // 1
-				safeName(mv.TimeDimension),     // 2
-				tsAlias,                        // 3
-				strings.Join(selectCols, ", "), // 4
-				safeName(mv.Table),             // 5
-				whereClause,                    // 6
-				timezone,                       // 7
-				havingClause,                   // 8
-			)
-		} else { // date_trunc is faster than time_bucket for year, month, week
-			sql = fmt.Sprintf(
-				`
-					SELECT
-					timezone('%[7]s', date_trunc('%[1]s', timezone('%[7]s', %[2]s::TIMESTAMPTZ))) as %[3]s,
-					%[4]s
-					FROM %[5]s
-					WHERE %[6]s
-					GROUP BY 1
-					%[8]s
-					ORDER BY 1`,
-				dateTruncSpecifier,             // 1
-				safeName(mv.TimeDimension),     // 2
-				tsAlias,                        // 3
-				strings.Join(selectCols, ", "), // 4
-				safeName(mv.Table),             // 5
-				whereClause,                    // 6
-				timezone,                       // 7
-				havingClause,                   // 8
-			)
-		}
-	} else {
-		sql = fmt.Sprintf(
-			`
-				SELECT
-					timezone('%[7]s', date_trunc('%[1]s', timezone('%[7]s', %[2]s::TIMESTAMPTZ) + INTERVAL %[8]s) - (INTERVAL %[8]s)) as %[3]s,
-				%[4]s
-				FROM %[5]s
-				WHERE %[6]s
-				GROUP BY 1
-				%[9]s
-				ORDER BY 1`,
-			dateTruncSpecifier,             // 1
-			safeName(mv.TimeDimension),     // 2
-			tsAlias,                        // 3
-			strings.Join(selectCols, ", "), // 4
-			safeName(mv.Table),             // 5
-			whereClause,                    // 6
-			timezone,                       // 7
-			shift,                          // 8
-			havingClause,                   // 9
-		)
-	}
-
-	return sql
 }
 
 func generateNullRecords(schema *runtimev1.StructType) *structpb.Struct {
@@ -461,4 +287,75 @@ func addTo(t time.Time, d duration.Duration, tz *time.Location) time.Time {
 		return d.Add(t)
 	}
 	return d.Add(t.In(tz)).In(time.UTC)
+}
+
+func (q *MetricsViewTimeSeries) rewriteToMetricsViewQuery(timeDimension string) (*metricsview.Query, error) {
+	qry := &metricsview.Query{MetricsView: q.MetricsViewName}
+
+	for _, m := range q.MeasureNames {
+		qry.Measures = append(qry.Measures, metricsview.Measure{Name: m})
+	}
+
+	res := &metricsview.TimeRange{}
+	if q.TimeStart != nil {
+		res.Start = q.TimeStart.AsTime()
+	}
+	if q.TimeEnd != nil {
+		res.End = q.TimeEnd.AsTime()
+	}
+	qry.TimeRange = res
+
+	if q.Limit != 0 {
+		qry.Limit = &q.Limit
+	}
+
+	if q.Offset != 0 {
+		qry.Offset = &q.Offset
+	}
+
+	for _, s := range q.Sort {
+		qry.Sort = append(qry.Sort, metricsview.Sort{
+			Name: s.Name,
+			Desc: !s.Ascending,
+		})
+	}
+
+	if len(q.Sort) == 0 {
+		qry.Sort = append(qry.Sort, metricsview.Sort{
+			Name: timeDimension,
+			Desc: false,
+		})
+	}
+
+	if q.Filter != nil { // Backwards compatibility
+		if q.Where != nil {
+			return nil, fmt.Errorf("both filter and where is provided")
+		}
+		q.Where = convertFilterToExpression(q.Filter)
+	}
+
+	var err error
+	qry.Where, err = metricViewExpression(q.Where, q.WhereSQL)
+	if err != nil {
+		return nil, fmt.Errorf("error converting where clause: %w", err)
+	}
+
+	qry.Having, err = metricViewExpression(q.Having, q.HavingSQL)
+	if err != nil {
+		return nil, fmt.Errorf("error converting having clause: %w", err)
+	}
+
+	qry.Dimensions = append(qry.Dimensions, metricsview.Dimension{
+		Name: timeDimension,
+		Compute: &metricsview.DimensionCompute{
+			TimeFloor: &metricsview.DimensionComputeTimeFloor{
+				Dimension: timeDimension,
+				Grain:     metricsview.TimeGrainFromProto(q.TimeGranularity),
+			},
+		},
+	})
+
+	qry.TimeZone = q.TimeZone
+
+	return qry, nil
 }

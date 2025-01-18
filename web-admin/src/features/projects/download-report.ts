@@ -1,25 +1,29 @@
 // TODO: move this file once other parts are merged
 
 import {
-  createQueryServiceExport,
-  RpcStatus,
+  createQueryServiceExportReport,
+  type RpcStatus,
   V1ExportFormat,
 } from "@rilldata/web-common/runtime-client";
 import { runtime } from "@rilldata/web-common/runtime-client/runtime-store";
-import { createMutation, CreateMutationOptions } from "@tanstack/svelte-query";
+import {
+  createMutation,
+  type CreateMutationOptions,
+} from "@tanstack/svelte-query";
 import type { MutationFunction } from "@tanstack/svelte-query";
 import { get } from "svelte/store";
 
 export type DownloadReportRequest = {
   instanceId: string;
+  reportId: string;
   format: V1ExportFormat;
-  bakedQuery: string;
+  executionTime: string;
   limit?: string;
 };
 
 export function createDownloadReportMutation<
   TError = { response: { data: RpcStatus } },
-  TContext = unknown
+  TContext = unknown,
 >(options?: {
   mutation?: CreateMutationOptions<
     Awaited<Promise<void>>,
@@ -29,7 +33,7 @@ export function createDownloadReportMutation<
   >;
 }) {
   const { mutation: mutationOptions } = options ?? {};
-  const exporter = createQueryServiceExport();
+  const exporter = createQueryServiceExportReport();
 
   const mutationFn: MutationFunction<
     Awaited<Promise<void>>,
@@ -40,9 +44,10 @@ export function createDownloadReportMutation<
 
     const exportResp = await get(exporter).mutateAsync({
       instanceId: data.instanceId,
+      report: data.reportId,
       data: {
         format: data.format,
-        bakedQuery: data.bakedQuery,
+        executionTime: data.executionTime,
         limit: data.limit,
       },
     });

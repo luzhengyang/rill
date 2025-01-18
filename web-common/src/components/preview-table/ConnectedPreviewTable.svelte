@@ -1,57 +1,61 @@
 <script lang="ts">
-  import PreviewTable from "@rilldata/web-common/components/preview-table/PreviewTable.svelte";
   import ReconcilingSpinner from "@rilldata/web-common/features/entity-management/ReconcilingSpinner.svelte";
   import {
+    type V1TableRowsResponseDataItem,
     createQueryServiceTableColumns,
     createQueryServiceTableRows,
   } from "@rilldata/web-common/runtime-client";
-  import { onMount } from "svelte";
   import { runtime } from "../../runtime-client/runtime-store";
+  import WorkspaceError from "../WorkspaceError.svelte";
+  import type { VirtualizedTableColumns } from "../virtualized-table/types";
+  import PreviewTable from "./PreviewTable.svelte";
 
-  export let objectName: string;
+  export let connector: string;
+  export let database: string = ""; // The backend interprets an empty string as the default database
+  export let databaseSchema: string = ""; // The backend interprets an empty string as the default schema
+  export let table: string;
   export let limit = 150;
   export let loading = false;
 
-  $: profileColumnsQuery = createQueryServiceTableColumns(
-    $runtime?.instanceId,
-    objectName,
-    {}
-  );
-  $: profileColumns =
-    $profileColumnsQuery?.data?.profileColumns ?? profileColumns; // Retain old profileColumns
+  let columns: VirtualizedTableColumns[] | undefined;
+  let rows: V1TableRowsResponseDataItem[] | undefined;
 
-  $: tableQuery = createQueryServiceTableRows(
-    $runtime?.instanceId,
-    objectName,
-    {
-      limit,
-    }
-  );
+  $: ({ instanceId } = $runtime);
 
-  $: rows = $tableQuery?.data?.data ?? rows; // Retain old rows
-
-  /** We will set the overscan amounts to 0 for initial render;
-   * in practice, this will shave off around 200ms from the initial render.
-   * Then, after 1 second, we will set the overscan amounts to 40 and 10,
-   * which wil then cause the table to render with the overscan amounts.
-   */
-  let rowOverscanAmount = 0;
-  let columnOverscanAmount = 0;
-  onMount(() => {
-    setTimeout(() => {
-      rowOverscanAmount = 40;
-      columnOverscanAmount = 10;
-    }, 1000);
+  $: columnsQuery = createQueryServiceTableColumns(instanceId, table, {
+    connector,
+    database,
+    databaseSchema,
   });
+  $: ({
+    data: columnsData,
+    isLoading: columnsIsLoading,
+    error: columnsError,
+  } = $columnsQuery);
+
+  $: rowsQuery = createQueryServiceTableRows(instanceId, table, {
+    connector,
+    database,
+    databaseSchema,
+    limit,
+  });
+  $: ({
+    data: rowsData,
+    isLoading: rowsIsLoading,
+    error: rowsError,
+  } = $rowsQuery);
+
+  $: columns =
+    (columnsData?.profileColumns as VirtualizedTableColumns[]) ?? columns; // Retain old profileColumns
+  $: rows = rowsData?.data ?? rows; // Retain old rows
 </script>
 
-{#if loading}
+{#if loading || rowsIsLoading || columnsIsLoading}
   <ReconcilingSpinner />
-{:else if rows && profileColumns}
-  <PreviewTable
-    {rows}
-    columnNames={profileColumns}
-    {rowOverscanAmount}
-    {columnOverscanAmount}
+{:else if rowsError || columnsError}
+  <WorkspaceError
+    message={`Error loading table: ${rowsError?.response.data?.message || columnsError?.response.data?.message}`}
   />
+{:else if rows && columns}
+  <PreviewTable {rows} columnNames={columns} name={table} />
 {/if}

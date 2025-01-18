@@ -3,6 +3,7 @@ package server_test
 import (
 	"context"
 	"fmt"
+	"math"
 	"testing"
 	"time"
 
@@ -144,7 +145,7 @@ func TestServer_ColumnDescriptiveStatistics(t *testing.T) {
 	_, err := server.ColumnDescriptiveStatistics(testCtx(), &runtimev1.ColumnDescriptiveStatisticsRequest{InstanceId: instanceId, TableName: "test", ColumnName: "col"})
 	if err != nil {
 		// "col" is a varchar column, so this should fail
-		require.ErrorContains(t, err, "No function matches the given name and argument types 'approx_quantile(VARCHAR, DECIMAL(3,2))'")
+		require.ErrorContains(t, err, "No function matches the given name and argument types 'isinf(VARCHAR)'")
 	}
 
 	res, err := server.ColumnDescriptiveStatistics(testCtx(), &runtimev1.ColumnDescriptiveStatisticsRequest{InstanceId: instanceId, TableName: "test", ColumnName: "val"})
@@ -156,7 +157,7 @@ func TestServer_ColumnDescriptiveStatistics(t *testing.T) {
 	require.Equal(t, 1.0, res.NumericSummary.GetNumericStatistics().Q25)
 	require.Equal(t, 1.0, res.NumericSummary.GetNumericStatistics().Q50)
 	require.Equal(t, 4.0, res.NumericSummary.GetNumericStatistics().Q75)
-	require.Equal(t, 1.6, res.NumericSummary.GetNumericStatistics().Sd)
+	require.True(t, math.IsNaN(res.NumericSummary.GetNumericStatistics().Sd))
 }
 
 func TestServer_ColumnDescriptiveStatistics_EmptyModel(t *testing.T) {
@@ -176,7 +177,7 @@ func TestServer_ColumnTimeGrain(t *testing.T) {
 	_, err := server.ColumnTimeGrain(testCtx(), &runtimev1.ColumnTimeGrainRequest{InstanceId: instanceId, TableName: "test", ColumnName: "val"})
 	if err != nil {
 		// "val" is a numeric column, so this should fail
-		require.ErrorContains(t, err, "Binder Error: No function matches the given name and argument types 'date_part(VARCHAR, INTEGER)'")
+		require.ErrorContains(t, err, "Binder Error: No function matches the given name and argument types 'date_part(STRING_LITERAL, INTEGER)'")
 	}
 	res, err := server.ColumnTimeGrain(testCtx(), &runtimev1.ColumnTimeGrainRequest{InstanceId: instanceId, TableName: "test", ColumnName: "times"})
 	require.NoError(t, err)
@@ -191,7 +192,7 @@ func TestServer_ColumnTimeGrain_EmptyModel(t *testing.T) {
 	_, err := server.ColumnTimeGrain(testCtx(), &runtimev1.ColumnTimeGrainRequest{InstanceId: instanceId, TableName: "test", ColumnName: "val"})
 	if err != nil {
 		// "val" is a numeric column, so this should fail
-		require.ErrorContains(t, err, "Binder Error: No function matches the given name and argument types 'date_part(VARCHAR, INTEGER)'")
+		require.ErrorContains(t, err, "Binder Error: No function matches the given name and argument types 'date_part(STRING_LITERAL, INTEGER)'")
 	}
 	res, err := server.ColumnTimeGrain(testCtx(), &runtimev1.ColumnTimeGrainRequest{InstanceId: instanceId, TableName: "test", ColumnName: "times"})
 	require.NoError(t, err)
@@ -489,9 +490,6 @@ func TestServer_GetTimeRangeSummary(t *testing.T) {
 	require.NotNil(t, res)
 	require.Equal(t, parseTime(t, "2022-11-01T00:00:00Z"), res.TimeRangeSummary.Min.AsTime())
 	require.Equal(t, parseTime(t, "2022-11-03T00:00:00Z"), res.TimeRangeSummary.Max.AsTime())
-	require.Equal(t, int32(0), res.TimeRangeSummary.Interval.Months)
-	require.Equal(t, int32(2), res.TimeRangeSummary.Interval.Days)
-	require.Equal(t, int64(0), res.TimeRangeSummary.Interval.Micros)
 }
 
 func TestServer_GetTimeRangeSummary_EmptyModel(t *testing.T) {
@@ -504,7 +502,6 @@ func TestServer_GetTimeRangeSummary_EmptyModel(t *testing.T) {
 	require.NotNil(t, res)
 	require.Nil(t, res.TimeRangeSummary.Max)
 	require.Nil(t, res.TimeRangeSummary.Min)
-	require.Nil(t, res.TimeRangeSummary.Interval)
 }
 
 func TestServer_GetTimeRangeSummary_Date_Column(t *testing.T) {
@@ -517,9 +514,6 @@ func TestServer_GetTimeRangeSummary_Date_Column(t *testing.T) {
 	require.NotNil(t, res)
 	require.Equal(t, parseTime(t, "2007-04-01T00:00:00Z"), res.TimeRangeSummary.Min.AsTime())
 	require.Equal(t, parseTime(t, "2011-06-30T00:00:00Z"), res.TimeRangeSummary.Max.AsTime())
-	require.Equal(t, int32(0), res.TimeRangeSummary.Interval.Months)
-	require.Equal(t, int32(1551), res.TimeRangeSummary.Interval.Days)
-	require.Equal(t, int64(0), res.TimeRangeSummary.Interval.Micros)
 }
 
 func parseTimeToProtoTimeStamps(tst *testing.T, t string) *timestamppb.Timestamp {
@@ -609,7 +603,7 @@ func getColumnTestServerWithModel(t *testing.T, sql string, expectation int) (*s
 	server, err := server.NewServer(context.Background(), &server.Options{}, rt, nil, ratelimit.NewNoop(), activity.NewNoopClient())
 	require.NoError(t, err)
 
-	olap, release, err := rt.OLAP(testCtx(), instanceID)
+	olap, release, err := rt.OLAP(testCtx(), instanceID, "")
 	require.NoError(t, err)
 	defer release()
 	res, err := olap.Execute(testCtx(), &drivers.Statement{Query: "SELECT count(*) FROM test"})

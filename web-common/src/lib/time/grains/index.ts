@@ -7,7 +7,7 @@ import { V1TimeGrain } from "@rilldata/web-common/runtime-client";
 import { Duration } from "luxon";
 import { TIME_GRAIN } from "../config";
 import { getTimeWidth } from "../transforms";
-import type { TimeGrain } from "../types";
+import type { AvailableTimeGrain, TimeGrain } from "../types";
 
 export function unitToTimeGrain(unit: string): V1TimeGrain {
   return (
@@ -100,7 +100,7 @@ export function getAllowedTimeGrains(start: Date, end: Date): TimeGrain[] {
 
 export function isGrainBigger(
   possiblyBiggerGrain: V1TimeGrain,
-  possiblySmallerGrain: V1TimeGrain
+  possiblySmallerGrain: V1TimeGrain,
 ): boolean {
   const biggerGrainConfig = TIME_GRAIN[possiblyBiggerGrain];
   const smallerGrainConfig = TIME_GRAIN[possiblySmallerGrain];
@@ -111,10 +111,11 @@ export function isGrainBigger(
 }
 
 export function checkValidTimeGrain(
-  timeGrain: V1TimeGrain,
+  timeGrain: V1TimeGrain | undefined,
   timeGrainOptions: TimeGrain[],
-  minTimeGrain: V1TimeGrain
+  minTimeGrain: V1TimeGrain,
 ): boolean {
+  if (!timeGrain) return false;
   if (!timeGrainOptions.find((t) => t.grain === timeGrain)) return false;
 
   // If minTimeGrain is not specified, then all available timeGrains are valid
@@ -127,10 +128,10 @@ export function checkValidTimeGrain(
 export function findValidTimeGrain(
   timeGrain: V1TimeGrain,
   timeGrainOptions: TimeGrain[],
-  minTimeGrain: V1TimeGrain
+  minTimeGrain: V1TimeGrain,
 ): V1TimeGrain {
   const timeGrains = Object.values(TIME_GRAIN).map(
-    (timeGrain) => timeGrain.grain
+    (timeGrain) => timeGrain.grain,
   );
 
   const defaultIndex = timeGrains.indexOf(timeGrain);
@@ -154,4 +155,34 @@ export function findValidTimeGrain(
 
   // If no valid timeGrain is found, return the default timeGrain as fallback
   return timeGrain;
+}
+
+export function mapDurationToGrain(duration: string): V1TimeGrain {
+  for (const g in TIME_GRAIN) {
+    if (TIME_GRAIN[g].duration === duration) {
+      return TIME_GRAIN[g].grain;
+    }
+  }
+  return V1TimeGrain.TIME_GRAIN_UNSPECIFIED;
+}
+
+export function timeGrainToDuration(timeGrain: V1TimeGrain): string {
+  if (isAvailableTimeGrain(timeGrain)) {
+    const grainConfig = TIME_GRAIN[timeGrain];
+    return grainConfig.duration;
+  } else {
+    console.warn("Requested duration for invalid time grain: ", timeGrain);
+    // Default to 1 day if the time grain is invalid to fail gracefully
+    return "P1D";
+  }
+}
+
+export function isAvailableTimeGrain(
+  grain: V1TimeGrain,
+): grain is AvailableTimeGrain {
+  return (
+    grain !== V1TimeGrain.TIME_GRAIN_UNSPECIFIED &&
+    grain !== V1TimeGrain.TIME_GRAIN_MILLISECOND &&
+    grain !== V1TimeGrain.TIME_GRAIN_SECOND
+  );
 }

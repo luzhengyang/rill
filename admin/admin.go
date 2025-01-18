@@ -2,8 +2,15 @@ package admin
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
+	"cloud.google.com/go/storage"
+	"github.com/rilldata/rill/admin/ai"
+	"github.com/rilldata/rill/admin/billing"
+	"github.com/rilldata/rill/admin/billing/payment"
 	"github.com/rilldata/rill/admin/database"
+	"github.com/rilldata/rill/admin/jobs"
 	"github.com/rilldata/rill/admin/provisioner"
 	"github.com/rilldata/rill/runtime/pkg/email"
 	"github.com/rilldata/rill/runtime/server/auth"
@@ -11,28 +18,54 @@ import (
 )
 
 type Options struct {
-	DatabaseDriver  string
-	DatabaseDSN     string
-	ProvisionerSpec string
-	ExternalURL     string
+	DatabaseDriver            string
+	DatabaseDSN               string
+	DatabaseEncryptionKeyring string
+	ExternalURL               string
+	FrontendURL               string
+	ProvisionerSetJSON        string
+	DefaultProvisioner        string
+	VersionNumber             string
+	VersionCommit             string
+	MetricsProjectOrg         string
+	MetricsProjectName        string
+	AutoscalerCron            string
+	ScaleDownConstraint       int
 }
 
 type Service struct {
-	DB          database.DB
-	Provisioner *provisioner.StaticProvisioner
-	Email       *email.Client
-	Used        *usedFlusher
-	Github      Github
-	Logger      *zap.Logger
-	opts        *Options
-	issuer      *auth.Issuer
+	DB                  database.DB
+	Jobs                jobs.Client
+	URLs                *URLs
+	ProvisionerSet      map[string]provisioner.Provisioner
+	Email               *email.Client
+	Github              Github
+	AI                  ai.Client
+	Assets              *storage.BucketHandle
+	Used                *usedFlusher
+	Logger              *zap.Logger
+	opts                *Options
+	issuer              *auth.Issuer
+	VersionNumber       string
+	VersionCommit       string
+	MetricsProjectID    string
+	AutoscalerCron      string
+	ScaleDownConstraint int
+	Biller              billing.Biller
+	PaymentProvider     payment.Provider
 }
 
-func New(ctx context.Context, opts *Options, logger *zap.Logger, issuer *auth.Issuer, emailClient *email.Client, github Github) (*Service, error) {
+func New(ctx context.Context, opts *Options, logger *zap.Logger, issuer *auth.Issuer, emailClient *email.Client, github Github, aiClient ai.Client, assets *storage.BucketHandle, biller billing.Biller, p payment.Provider) (*Service, error) {
 	// Init db
-	db, err := database.Open(opts.DatabaseDriver, opts.DatabaseDSN)
+	db, err := database.Open(opts.DatabaseDriver, opts.DatabaseDSN, opts.DatabaseEncryptionKeyring)
 	if err != nil {
 		logger.Fatal("error connecting to database", zap.Error(err))
+	}
+
+	// Init URLs
+	urls, err := NewURLs(opts.ExternalURL, opts.FrontendURL)
+	if err != nil {
+		logger.Fatal("error parsing URLs", zap.Error(err))
 	}
 
 	// Auto-run migrations
@@ -54,25 +87,65 @@ func New(ctx context.Context, opts *Options, logger *zap.Logger, issuer *auth.Is
 		logger.Info("database migrated", zap.Int("from_version", v1), zap.Int("to_version", v2))
 	}
 
-	// Create provisioner
-	prov, err := provisioner.NewStatic(opts.ProvisionerSpec, db)
+	// Create provisioner set
+	provSet, err := provisioner.NewSet(opts.ProvisionerSetJSON, db, logger)
 	if err != nil {
 		return nil, err
 	}
 
+	// Verify that the specified default provisioner is in the provisioner set
+	_, ok := provSet[opts.DefaultProvisioner]
+	if !ok {
+		return nil, fmt.Errorf("default provisioner %q is not in the provisioner set", opts.DefaultProvisioner)
+	}
+
+	// Look for the optional metrics project
+	var metricsProjectID string
+	if opts.MetricsProjectOrg != "" && opts.MetricsProjectName != "" {
+		proj, err := db.FindProjectByName(ctx, opts.MetricsProjectOrg, opts.MetricsProjectName)
+		if err != nil {
+			return nil, fmt.Errorf("error looking up metrics project: %w", err)
+		}
+		metricsProjectID = proj.ID
+	}
+
 	return &Service{
-		DB:          db,
-		Provisioner: prov,
-		Email:       emailClient,
-		Github:      github,
-		Used:        newUsedFlusher(logger, db),
-		opts:        opts,
-		Logger:      logger,
-		issuer:      issuer,
+		DB:                  db,
+		URLs:                urls,
+		ProvisionerSet:      provSet,
+		Email:               emailClient,
+		Github:              github,
+		AI:                  aiClient,
+		Assets:              assets,
+		Used:                newUsedFlusher(logger, db),
+		Logger:              logger,
+		opts:                opts,
+		issuer:              issuer,
+		VersionNumber:       opts.VersionNumber,
+		VersionCommit:       opts.VersionCommit,
+		MetricsProjectID:    metricsProjectID,
+		AutoscalerCron:      opts.AutoscalerCron,
+		ScaleDownConstraint: opts.ScaleDownConstraint,
+		Biller:              biller,
+		PaymentProvider:     p,
 	}, nil
 }
 
 func (s *Service) Close() error {
+	var allErrs error
+	for _, p := range s.ProvisionerSet {
+		err := p.Close()
+		if err != nil {
+			allErrs = errors.Join(allErrs, err)
+		}
+	}
+
 	s.Used.Close()
-	return s.DB.Close()
+
+	err := s.DB.Close()
+	if err != nil {
+		allErrs = errors.Join(allErrs, err)
+	}
+
+	return allErrs
 }

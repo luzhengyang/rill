@@ -1,9 +1,13 @@
 export enum EntityType {
+  Connector = "Connector",
   Table = "Table",
   Model = "Model",
   Application = "Application",
   MetricsDefinition = "MetricsDefinition",
   MetricsExplorer = "MetricsExplorer",
+  Chart = "Chart",
+  Canvas = "Canvas",
+  Unknown = "Unknown",
 }
 
 export enum StateType {

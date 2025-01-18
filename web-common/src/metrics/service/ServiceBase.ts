@@ -1,3 +1,5 @@
+import type { MetricsEventFactory } from "./MetricsEventFactory";
+
 /**
  * Picks only action functions from handler.
  * Action function is identified based on FirstArg type.
@@ -26,23 +28,23 @@ export type ExtractActionTypeDefinitions<FirstArg, Handler> = {
     : never;
 };
 
-export function getActionMethods(instance: unknown): Array<string> {
+export function getActionMethods(instance: MetricsEventFactory): Array<string> {
   return Object.getOwnPropertyNames(instance.constructor.prototype).filter(
     (prototypeMember) => {
       const descriptor = Object.getOwnPropertyDescriptor(
         instance.constructor.prototype,
-        prototypeMember
+        prototypeMember,
       );
       return (
         prototypeMember !== "constructor" &&
-        typeof descriptor.value === "function"
+        typeof descriptor?.value === "function"
       );
-    }
+    },
   );
 }
 
 export interface ActionServiceBase<
-  ActionsDefinition extends Record<string, Array<unknown>>
+  ActionsDefinition extends Record<string, Array<unknown>>,
 > {
   /**
    * Will be called by ActionQueueOrchestrator once the action has been scheduled
@@ -51,6 +53,6 @@ export interface ActionServiceBase<
    */
   dispatch<Action extends keyof ActionsDefinition>(
     action: Action,
-    args: ActionsDefinition[Action]
+    args: ActionsDefinition[Action],
   ): Promise<unknown>;
 }

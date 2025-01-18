@@ -4,11 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	runtimev1 "github.com/rilldata/rill/proto/gen/rill/runtime/v1"
 	"github.com/rilldata/rill/runtime"
-	"github.com/rilldata/rill/runtime/drivers"
+	"github.com/rilldata/rill/runtime/metricsview"
 )
 
 func init() {
@@ -67,95 +66,64 @@ func (r *MetricsViewReconciler) Reconcile(ctx context.Context, n *runtimev1.Reso
 		return runtime.ReconcileResult{}
 	}
 
-	// NOTE: Not checking refs here since refs may still be valid even if they have errors (in case of staged changes).
-	// Instead, we just validate against the table name.
+	// If the spec references a model, try resolving it to a table before validating it.
+	// For backwards compatibility, the model may actually be a source or external table.
+	// So if a model is not found, we optimistically use the model name as the table and proceed to validation
+	if mv.Spec.Model != "" {
+		res, err := r.C.Get(ctx, &runtimev1.ResourceName{Name: mv.Spec.Model, Kind: runtime.ResourceKindModel}, false)
+		if err == nil && res.GetModel().State.ResultTable != "" {
+			mv.Spec.Table = res.GetModel().State.ResultTable
+			mv.Spec.Connector = res.GetModel().State.ResultConnector
+		} else {
+			mv.Spec.Table = mv.Spec.Model
+		}
+	}
 
-	validateErr := r.validate(ctx, mv.Spec)
+	// Find out if the metrics view has a ref to a source or model in the same project.
+	hasInternalRef := false
+	for _, ref := range self.Meta.Refs {
+		if ref.Kind == runtime.ResourceKindSource || ref.Kind == runtime.ResourceKindModel {
+			hasInternalRef = true
+		}
+	}
 
+	// NOTE: In other reconcilers, state like spec_hash and refreshed_on is used to avoid redundant reconciles.
+	// We don't do that here because none of the operations below are particularly expensive.
+	// So it doesn't really matter if they run a bit more often than necessary ¯\_(ツ)_/¯.
+
+	// NOTE: Not checking refs for errors since they may still be valid even if they have errors. Instead, we just validate the metrics view against the table name.
+
+	// Validate the metrics view and update ValidSpec
+	e, err := metricsview.NewExecutor(ctx, r.C.Runtime, r.C.InstanceID, mv.Spec, !hasInternalRef, runtime.ResolvedSecurityOpen, 0)
+	if err != nil {
+		return runtime.ReconcileResult{Err: fmt.Errorf("failed to create metrics view executor: %w", err)}
+	}
+	defer e.Close()
+	validateResult, validateErr := e.ValidateMetricsView(ctx)
+	if validateErr == nil {
+		validateErr = validateResult.Error()
+	}
 	if ctx.Err() != nil {
 		return runtime.ReconcileResult{Err: errors.Join(validateErr, ctx.Err())}
 	}
-
 	if validateErr == nil {
 		mv.State.ValidSpec = mv.Spec
 	} else {
 		mv.State.ValidSpec = nil
 	}
 
+	// Set the "streaming" state (see docstring in the proto for details).
+	mv.State.Streaming = false
+	if validateErr == nil {
+		// If no internal ref, we assume the metrics view is based on an externally managed table and set the streaming state to true.
+		mv.State.Streaming = !hasInternalRef
+	}
+
+	// Update state. Even if the validation result is unchanged, we always update the state to ensure the state version is incremented.
 	err = r.C.UpdateState(ctx, self.Meta.Name, self)
 	if err != nil {
 		return runtime.ReconcileResult{Err: err}
 	}
 
 	return runtime.ReconcileResult{Err: validateErr}
-}
-
-func (r *MetricsViewReconciler) validate(ctx context.Context, mv *runtimev1.MetricsViewSpec) error {
-	olap, release, err := r.C.AcquireOLAP(ctx, mv.Connector)
-	if err != nil {
-		return err
-	}
-	defer release()
-
-	// Check underlying table exists
-	t, err := olap.InformationSchema().Lookup(ctx, mv.Table)
-	if err != nil {
-		if errors.Is(err, drivers.ErrNotFound) {
-			return fmt.Errorf("table %q does not exist", mv.Table)
-		}
-		return fmt.Errorf("could not find table %q: %w", mv.Table, err)
-	}
-
-	fields := make(map[string]*runtimev1.StructType_Field, len(t.Schema.Fields))
-	for _, f := range t.Schema.Fields {
-		fields[strings.ToLower(f.Name)] = f
-	}
-
-	// Check time dimension exists
-	if mv.TimeDimension != "" {
-		f, ok := fields[strings.ToLower(mv.TimeDimension)]
-		if !ok {
-			return fmt.Errorf("timeseries %q is not a column in table %q", mv.TimeDimension, mv.Table)
-		}
-		if f.Type.Code != runtimev1.Type_CODE_TIMESTAMP && f.Type.Code != runtimev1.Type_CODE_DATE {
-			return fmt.Errorf("timeseries %q is not a TIMESTAMP column", mv.TimeDimension)
-		}
-	}
-
-	var errs []error
-
-	// Check dimension columns exist
-	for _, d := range mv.Dimensions {
-		if _, ok := fields[strings.ToLower(d.Column)]; !ok {
-			errs = append(errs, fmt.Errorf("dimension column %q not found in table %q", d.Column, mv.Table))
-		}
-	}
-
-	// Check measure expressions are valid
-	for _, d := range mv.Measures {
-		err := validateMeasure(ctx, olap, t, d)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("invalid expression for measure %q: %w", d.Name, err))
-		}
-	}
-
-	if mv.DefaultTheme != "" {
-		_, err := r.C.Get(ctx, &runtimev1.ResourceName{Kind: runtime.ResourceKindTheme, Name: mv.DefaultTheme}, false)
-		if err != nil {
-			if errors.Is(err, drivers.ErrNotFound) {
-				return fmt.Errorf("theme %q does not exist", mv.DefaultTheme)
-			}
-			return fmt.Errorf("could not find theme %q: %w", mv.DefaultTheme, err)
-		}
-	}
-
-	return errors.Join(errs...)
-}
-
-func validateMeasure(ctx context.Context, olap drivers.OLAPStore, t *drivers.Table, m *runtimev1.MetricsViewSpec_MeasureV2) error {
-	err := olap.Exec(ctx, &drivers.Statement{
-		Query:  fmt.Sprintf("SELECT %s from %s", m.Expression, safeSQLName(t.Name)),
-		DryRun: true,
-	})
-	return err
 }

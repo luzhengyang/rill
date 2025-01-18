@@ -4,93 +4,107 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math/rand"
 
-	"github.com/c2h5oh/datasize"
 	"github.com/rilldata/rill/admin/database"
+	"go.uber.org/zap"
 )
 
-type Allocation struct {
-	Host         string
-	Audience     string
-	DataDir      string
-	CPU          int
-	MemoryGB     int
-	StorageBytes int64
+// ProvisionerInitializer creates a new provisioner.
+type ProvisionerInitializer func(specJSON []byte, db database.DB, logger *zap.Logger) (Provisioner, error)
+
+// Initializers is a registry of provisioner initializers by type.
+var Initializers = make(map[string]ProvisionerInitializer)
+
+// Register registers a new provisioner initializer.
+func Register(typ string, fn ProvisionerInitializer) {
+	if Initializers[typ] != nil {
+		panic(fmt.Errorf("already registered provisioner of type %q", typ))
+	}
+	Initializers[typ] = fn
 }
 
-type ProvisionOptions struct {
-	OLAPDriver string
-	Slots      int
-	Region     string
+// Provisioner is able to provision resources for one or more resource types.
+type Provisioner interface {
+	// Type returns the type of the provisioner.
+	Type() string
+	// Close is called when the provisioner is no longer needed.
+	Close() error
+	// Supports indicates if it can provision the resource type.
+	Supports(rt ResourceType) bool
+	// Provision provisions a new resource.
+	// It may be called multiple times for the same ID if:
+	//  - the initial provision is interrupted, or
+	//  - the resource args are updated
+	//
+	// This means Provision should be idempotent for the resource's ID (or otherwise do appropriate garbage collection in calls to Check).
+	Provision(ctx context.Context, r *Resource, opts *ResourceOptions) (*Resource, error)
+	// Deprovision deprovisions a resource.
+	Deprovision(ctx context.Context, r *Resource) error
+	// AwaitReady waits for a resource to be ready.
+	AwaitReady(ctx context.Context, r *Resource) error
+	// Check is called periodically to health check the provisioner.
+	// The provided context should have a generous timeout to allow the provisioner to perform maintenance tasks.
+	Check(ctx context.Context) error
+	// CheckResource is called periodically to health check a specific resource.
+	// The provided context should have a generous timeout to allow the provisioner to perform maintenance tasks for the resource.
+	// The resource's state map will be updated to match that of the returned value.
+	CheckResource(ctx context.Context, r *Resource, opts *ResourceOptions) (*Resource, error)
 }
 
-type StaticSpec struct {
-	Runtimes []*StaticRuntimeSpec `json:"runtimes"`
+// ResourceOptions contains metadata about a resource.
+type ResourceOptions struct {
+	// Service-specific arguments for the provisioner. See resources.go for supported arguments.
+	Args map[string]any
+	// Annotations for the project the resource belongs to.
+	Annotations map[string]string
+	// RillVersion is the current version of Rill.
+	RillVersion string
 }
 
-type StaticRuntimeSpec struct {
-	Host     string `json:"host"`
-	Region   string `json:"region"`
-	Slots    int    `json:"slots"`
-	DataDir  string `json:"data_dir"`
-	Audience string `json:"audience_url"`
+// Resource represents a provisioned resource.
+type Resource struct {
+	// ID uniquely identifies the provisioned resource.
+	ID string
+	// Type describes what type of service the resource is.
+	Type ResourceType
+	// State contains state about the provisioned resource for use by the provisioner.
+	// It should not be accessed outside of the provisioner.
+	State map[string]any
+	// Config contains access details for clients that use the resource.
+	Config map[string]any
 }
 
-type StaticProvisioner struct {
-	Spec *StaticSpec
-	db   database.DB
+// ProvisionerSpec is a JSON-serializable specification for a provisioner.
+type ProvisionerSpec struct {
+	Type string          `json:"type"`
+	Spec json.RawMessage `json:"spec"`
 }
 
-func NewStatic(spec string, db database.DB) (*StaticProvisioner, error) {
-	sps := &StaticSpec{}
-	err := json.Unmarshal([]byte(spec), sps)
+// NewSet initializes a set of provisioners from a JSON specification.
+// The JSON specification should be a map of names to ProvisionerSpecs.
+func NewSet(setSpecJSON string, db database.DB, logger *zap.Logger) (map[string]Provisioner, error) {
+	// Parse provisioner set
+	pts := map[string]ProvisionerSpec{}
+	err := json.Unmarshal([]byte(setSpecJSON), &pts)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse provisioner spec: %w", err)
+		return nil, fmt.Errorf("failed to parse provisioner set: %w", err)
 	}
 
-	return &StaticProvisioner{
-		Spec: sps,
-		db:   db,
-	}, nil
-}
-
-func (p *StaticProvisioner) Provision(ctx context.Context, opts *ProvisionOptions) (*Allocation, error) {
-	// Get slots currently used
-	stats, err := p.db.ResolveRuntimeSlotsUsed(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	hostToSlotsUsed := make(map[string]int, len(stats))
-	for _, stat := range stats {
-		hostToSlotsUsed[stat.RuntimeHost] = stat.SlotsUsed
-	}
-
-	// Find runtime with available capacity
-	targets := make([]*StaticRuntimeSpec, 0)
-	for _, candidate := range p.Spec.Runtimes {
-		if opts.Region != "" && opts.Region != candidate.Region {
-			continue
+	// Instantiate provisioners based on their type
+	ps := make(map[string]Provisioner)
+	for k, v := range pts {
+		fn, ok := Initializers[v.Type]
+		if !ok {
+			return nil, fmt.Errorf("unknown type %q for provisioner %q", v.Type, k)
 		}
 
-		if hostToSlotsUsed[candidate.Host]+opts.Slots <= candidate.Slots {
-			targets = append(targets, candidate)
+		p, err := fn(v.Spec, db, logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize provisioner %q: %w", k, err)
 		}
+
+		ps[k] = p
 	}
 
-	if len(targets) == 0 {
-		return nil, fmt.Errorf("no runtimes found with sufficient available slots")
-	}
-
-	// nolint:gosec // We don't need cryptographically secure random numbers
-	target := targets[rand.Intn(len(targets))]
-	return &Allocation{
-		Host:         target.Host,
-		Audience:     target.Audience,
-		DataDir:      target.DataDir,
-		CPU:          1 * opts.Slots,
-		MemoryGB:     2 * opts.Slots,
-		StorageBytes: int64(opts.Slots) * 40 * int64(datasize.GB),
-	}, nil
+	return ps, nil
 }

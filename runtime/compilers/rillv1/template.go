@@ -3,6 +3,7 @@ package rillv1
 import (
 	"bytes"
 	"fmt"
+	"strings"
 	"text/template"
 	"text/template/parse"
 
@@ -19,7 +20,7 @@ import (
 // b) populating values at resolve time (such as {{ .env ... }} and {{ ref ... }})
 //
 // The resolve time of a template varies. For models, the resolve time is when they are created in the database.
-// But for dashboard expressions, the resolve time is when the dashboard is rendered.
+// But for metrics expressions, the resolve time is when the metrics are queried.
 //
 // Note that no template resolution happens at parse time. This means templating can't be used to alter the structure of YAML files.
 // Instead, templating can be used to alter values in certain YAML properties at resolve time.
@@ -32,7 +33,7 @@ import (
 //     dependency [`kind`] `name`: register a dependency (parse time)
 //     ref [`kind`] `name`: register a dependency at parse-time, resolve it to a name at resolve time (parse time and resolve time)
 //     lookup [`kind`] `name`: lookup another resource (resolve time)
-//     .env.name: access a variable (resolve time)
+//     .env.name: access a project "environment" variable (resolve time)
 //     .user.attribute: access an attribute from auth claims (resolve time)
 //     .meta: access the current resource's metadata (resolve time)
 //     .spec: access the current resource's spec (resolve time)
@@ -42,12 +43,14 @@ import (
 
 // TemplateData contains data for resolving a template.
 type TemplateData struct {
-	User       map[string]any
-	Variables  map[string]string
-	ExtraProps map[string]any
-	Self       TemplateResource
-	Resolve    func(ref ResourceName) (string, error)
-	Lookup     func(name ResourceName) (TemplateResource, error)
+	Environment string
+	User        map[string]any
+	Variables   map[string]string
+	State       map[string]any
+	ExtraProps  map[string]any
+	Self        TemplateResource
+	Resolve     func(ref ResourceName) (string, error)
+	Lookup      func(name ResourceName) (TemplateResource, error)
 }
 
 // TemplateResource contains data for a resource for injection into a template.
@@ -73,7 +76,7 @@ func AnalyzeTemplate(tmpl string) (*TemplateMetadata, error) {
 	refs := map[ResourceName]bool{}
 
 	// Build func map
-	funcMap := newFuncMap()
+	funcMap := newFuncMap("", nil)
 	funcMap["configure"] = func(parts ...any) (string, error) {
 		if len(parts) == 1 {
 			// Configure from YAML
@@ -123,7 +126,7 @@ func AnalyzeTemplate(tmpl string) (*TemplateMetadata, error) {
 		return map[string]any{}, nil
 	}
 
-	// Parse template (error on missing keys)
+	// Parse template
 	t, err := template.New("").Funcs(funcMap).Option("missingkey=default").Parse(tmpl)
 	if err != nil {
 		return nil, err
@@ -131,11 +134,16 @@ func AnalyzeTemplate(tmpl string) (*TemplateMetadata, error) {
 
 	// Build template data
 	dataMap := map[string]interface{}{
-		"user":  map[string]any{},
-		"env":   map[string]any{},
-		"meta":  map[string]any{},
-		"spec":  map[string]any{},
-		"state": map[string]any{},
+		"environment": "",
+		"user":        map[string]any{},
+		"env":         map[string]any{},
+		"vars":        map[string]any{}, // Deprecated in favor of "env"
+		"state":       map[string]any{},
+		"self": map[string]any{
+			"meta":  map[string]any{},
+			"spec":  map[string]any{},
+			"state": map[string]any{},
+		},
 	}
 
 	// Resolve template
@@ -144,15 +152,11 @@ func AnalyzeTemplate(tmpl string) (*TemplateMetadata, error) {
 		return nil, err
 	}
 
-	variables, err := ExtractVariablesFromTemplate(t.Tree)
-	if err != nil {
-		return nil, err
-	}
-
 	// Check if there is any templating
 	noTemplating := len(t.Root.Nodes) == 0 || len(t.Root.Nodes) == 1 && t.Root.Nodes[0].Type() == parse.NodeText
 
 	// Done
+	variables := extractVariablesFromTemplate(t.Tree)
 	return &TemplateMetadata{
 		Refs:                     maps.Keys(refs),
 		Config:                   config,
@@ -162,10 +166,43 @@ func AnalyzeTemplate(tmpl string) (*TemplateMetadata, error) {
 	}, nil
 }
 
+// AnalyzeTemplateRecursively analyzes strings nested in the provided value for template tags that reference variables.
+// Variables are added as keys to the provided map, with empty strings as values.
+// The values are empty strings instead of booleans as an optimization to enable re-using the map in upstream code.
+func AnalyzeTemplateRecursively(val any, res map[string]string) error {
+	switch val := val.(type) {
+	case string:
+		meta, err := AnalyzeTemplate(val)
+		if err != nil {
+			return err
+		}
+		for _, k := range meta.Variables {
+			res[k] = ""
+		}
+	case map[string]any:
+		for _, v := range val {
+			err := AnalyzeTemplateRecursively(v, res)
+			if err != nil {
+				return err
+			}
+		}
+	case []any:
+		for _, v := range val {
+			err := AnalyzeTemplateRecursively(v, res)
+			if err != nil {
+				return err
+			}
+		}
+	default:
+		// Nothing to do
+	}
+	return nil
+}
+
 // ResolveTemplate resolves a template to a string using the given data.
 func ResolveTemplate(tmpl string, data TemplateData) (string, error) {
 	// Base func map
-	funcMap := newFuncMap()
+	funcMap := newFuncMap(data.Environment, data.State)
 
 	// Add no-ops
 	funcMap["configure"] = func(parts ...string) error { return nil }
@@ -191,6 +228,11 @@ func ResolveTemplate(tmpl string, data TemplateData) (string, error) {
 
 	// Add func to lookup another resource
 	funcMap["lookup"] = func(parts ...string) (map[string]any, error) {
+		// Support is optional
+		if data.Lookup == nil {
+			return nil, fmt.Errorf(`function "lookup" is not supported in this context`)
+		}
+
 		// Parse the resource name
 		name, err := resourceNameFromArgs(parts...)
 		if err != nil {
@@ -213,18 +255,67 @@ func ResolveTemplate(tmpl string, data TemplateData) (string, error) {
 
 	// Parse template (error on missing keys)
 	// TODO: missingkey=error may be problematic for claims.
-	t, err := template.New("").Funcs(funcMap).Option("missingkey=error").Parse(tmpl)
+	t, err := template.New("").Funcs(funcMap).Option("missingkey=default").Parse(tmpl)
 	if err != nil {
 		return "", err
 	}
 
+	// Split variables that contain dots into nested maps.
+	var vars map[string]any
+	if len(data.Variables) > 0 {
+		vars = map[string]any{}
+	}
+	for k, v := range data.Variables {
+		// Note: We always add the full variable name (including dots) at the top level.
+		vars[k] = v
+
+		// Split variable into parts
+		parts := strings.Split(k, ".")
+		if len(parts) <= 1 {
+			continue
+		}
+
+		// Build nested maps
+		curr := vars
+		for i, part := range parts {
+			// We reached the leaf, set the value
+			if i == len(parts)-1 {
+				curr[part] = v
+				break
+			}
+
+			// Add or find nested map
+			v, ok := curr[part]
+			if !ok {
+				v = map[string]any{}
+				curr[part] = v
+			}
+			curr, ok = v.(map[string]any)
+			if !ok {
+				// Edge case where a variable name collides with a part name.
+				// We skip adding the nested map, and instead the keep the full variable.
+				break
+			}
+		}
+	}
+
 	// Build template data
+	var self map[string]any
+	if data.Self.Meta != nil {
+		self = map[string]any{
+			"kind":  data.Self.Meta.Name.Kind,
+			"name":  data.Self.Meta.Name.Name,
+			"spec":  data.Self.Spec,
+			"state": data.Self.State,
+		}
+	}
 	dataMap := map[string]interface{}{
-		"user":  data.User,
-		"env":   data.Variables,
-		"meta":  data.Self.Meta,
-		"spec":  data.Self.Spec,
-		"state": data.Self.State,
+		"environment": data.Environment,
+		"user":        data.User,
+		"env":         vars,
+		"vars":        vars, // Deprecated in favor of "env"
+		"state":       data.State,
+		"self":        self,
 	}
 
 	// Add extra props
@@ -241,13 +332,50 @@ func ResolveTemplate(tmpl string, data TemplateData) (string, error) {
 	return res.String(), nil
 }
 
+// ResolveTemplateRecursively recursively traverses the provided value and applies ResolveTemplate to any string it encounters.
+// It may overwrite the provided value in-place.
+func ResolveTemplateRecursively(val any, data TemplateData) (any, error) {
+	switch val := val.(type) {
+	case string:
+		return ResolveTemplate(val, data)
+	case map[string]any:
+		for k, v := range val {
+			v, err := ResolveTemplateRecursively(v, data)
+			if err != nil {
+				return nil, err
+			}
+			val[k] = v
+		}
+		return val, nil
+	case []any:
+		for i, v := range val {
+			v, err := ResolveTemplateRecursively(v, data)
+			if err != nil {
+				return nil, err
+			}
+			val[i] = v
+		}
+		return val, nil
+	default:
+		return val, nil
+	}
+}
+
 // newFuncMap creates a base func map for templates.
-func newFuncMap() template.FuncMap {
+func newFuncMap(environment string, state map[string]any) template.FuncMap {
 	// Add Sprig template functions (removing functions that leak host info)
 	// Derived from Helm: https://github.com/helm/helm/blob/main/pkg/engine/funcs.go
 	funcMap := sprig.TxtFuncMap()
 	delete(funcMap, "env")
 	delete(funcMap, "expandenv")
+
+	// Add helpers for checking for common environments
+	funcMap["dev"] = func() bool { return environment == "dev" }
+	funcMap["prod"] = func() bool { return environment == "prod" }
+
+	// Add helper for checking .state.incremental
+	funcMap["incremental"] = func() bool { return state != nil && state["incremental"] == true }
+
 	return funcMap
 }
 
@@ -275,7 +403,7 @@ func resourceNameFromArgs(parts ...string) (ResourceName, error) {
 }
 
 func EvaluateBoolExpression(expr string) (bool, error) {
-	if expr == "" {
+	if strings.TrimSpace(expr) == "" {
 		return false, fmt.Errorf("cannot evaluate empty expression")
 	}
 	result, err := duckdbsql.EvaluateBool(expr)
@@ -285,7 +413,7 @@ func EvaluateBoolExpression(expr string) (bool, error) {
 	return result, nil
 }
 
-func ExtractVariablesFromTemplate(tree *parse.Tree) ([]string, error) {
+func extractVariablesFromTemplate(tree *parse.Tree) []string {
 	variablesMap := make(map[string]bool)
 	walkNodes(tree.Root, func(n parse.Node) {
 		if vn, ok := n.(*parse.FieldNode); ok {
@@ -294,7 +422,7 @@ func ExtractVariablesFromTemplate(tree *parse.Tree) ([]string, error) {
 		}
 	})
 
-	return maps.Keys(variablesMap), nil
+	return maps.Keys(variablesMap)
 }
 
 func walkNodes(node parse.Node, fn func(n parse.Node)) {

@@ -1,66 +1,86 @@
 <script lang="ts">
   import { Switch } from "@rilldata/web-common/components/button";
+  import Button from "@rilldata/web-common/components/button/Button.svelte";
   import Close from "@rilldata/web-common/components/icons/Close.svelte";
-  import SearchIcon from "@rilldata/web-common/components/icons/Search.svelte";
-  import Row from "@rilldata/web-common/components/icons/Row.svelte";
   import Column from "@rilldata/web-common/components/icons/Column.svelte";
+  import Row from "@rilldata/web-common/components/icons/Row.svelte";
+  import SearchIcon from "@rilldata/web-common/components/icons/Search.svelte";
   import { Search } from "@rilldata/web-common/components/search";
+  import SearchableFilterChip from "@rilldata/web-common/components/searchable-filter-menu/SearchableFilterChip.svelte";
   import Shortcut from "@rilldata/web-common/components/tooltip/Shortcut.svelte";
-  import Spinner from "@rilldata/web-common/features/entity-management/Spinner.svelte";
-  import { EntityStatus } from "@rilldata/web-common/features/entity-management/types";
-  import ComparisonSelector from "@rilldata/web-common/features/dashboards/time-controls/ComparisonSelector.svelte";
   import Tooltip from "@rilldata/web-common/components/tooltip/Tooltip.svelte";
   import TooltipContent from "@rilldata/web-common/components/tooltip/TooltipContent.svelte";
   import TooltipShortcutContainer from "@rilldata/web-common/components/tooltip/TooltipShortcutContainer.svelte";
   import TooltipTitle from "@rilldata/web-common/components/tooltip/TooltipTitle.svelte";
   import SelectAllButton from "@rilldata/web-common/features/dashboards/dimension-table/SelectAllButton.svelte";
-  import { cancelDashboardQueries } from "@rilldata/web-common/features/dashboards/dashboard-queries";
-  import { slideRight } from "@rilldata/web-common/lib/transitions";
-  import { useQueryClient } from "@tanstack/svelte-query";
-  import { createEventDispatcher } from "svelte";
-  import { fly } from "svelte/transition";
-  import {
-    metricsExplorerStore,
-    useDashboardStore,
-  } from "@rilldata/web-common/features/dashboards/stores/dashboard-stores";
-  import SearchableFilterChip from "@rilldata/web-common/components/searchable-filter-menu/SearchableFilterChip.svelte";
-  import { useMetaQuery } from "@rilldata/web-common/features/dashboards/selectors/index";
+  import ReplacePivotDialog from "@rilldata/web-common/features/dashboards/pivot/ReplacePivotDialog.svelte";
   import { getStateManagers } from "@rilldata/web-common/features/dashboards/state-managers/state-managers";
+  import {
+    dimensionSearchText,
+    metricsExplorerStore,
+  } from "@rilldata/web-common/features/dashboards/stores/dashboard-stores";
+  import ComparisonSelector from "@rilldata/web-common/features/dashboards/time-controls/ComparisonSelector.svelte";
+  import DelayedSpinner from "@rilldata/web-common/features/entity-management/DelayedSpinner.svelte";
+  import { TIME_GRAIN } from "@rilldata/web-common/lib/time/config";
+  import type { TimeGrain } from "@rilldata/web-common/lib/time/types";
+  import { slideRight } from "@rilldata/web-common/lib/transitions";
+  import {
+    createQueryServiceExport,
+    V1ExportFormat,
+  } from "@rilldata/web-common/runtime-client";
+  import { fly } from "svelte/transition";
+  import ExportMenu from "../../exports/ExportMenu.svelte";
+  import { featureFlags } from "../../feature-flags";
+  import { PivotChipType } from "../pivot/types";
+  import TimeGrainSelector from "../time-controls/TimeGrainSelector.svelte";
+  import exportTDD from "./export-tdd";
+  import { getTDDExportArgs } from "./getTDDExportArgs";
   import type { TDDComparison } from "./types";
 
-  export let metricViewName: string;
+  export let exploreName: string;
   export let dimensionName: string;
   export let isFetching = false;
-  export let comparing: TDDComparison;
+  export let comparing: TDDComparison | undefined;
   export let areAllTableRowsSelected = false;
   export let isRowsEmpty = false;
+  export let expandedMeasureName: string;
+  export let onToggleSearchItems: () => void;
+  export let hideStartPivotButton = false;
 
-  const queryClient = useQueryClient();
-  const dispatch = createEventDispatcher();
+  const { adminServer, exports } = featureFlags;
+  const exportDash = createQueryServiceExport();
+  const stateManagers = getStateManagers();
 
-  $: metaQuery = useMetaQuery(getStateManagers());
-  $: dashboardStore = useDashboardStore(metricViewName);
+  const {
+    selectors: {
+      measures: { measureLabel, allMeasures },
+      dimensions: { getDimensionDisplayName },
+    },
+    actions: {
+      dimensionsFilter: { toggleDimensionFilterMode },
+    },
+    dashboardStore,
+    validSpecStore,
+  } = stateManagers;
 
-  $: expandedMeasureName = $dashboardStore?.expandedMeasureName;
-  $: allMeasures = $metaQuery?.data?.measures ?? [];
+  const scheduledReportsQueryArgs = getTDDExportArgs(stateManagers);
 
-  $: selectableMeasures = allMeasures
-    ?.filter((m) => m.name !== undefined || m.label !== undefined)
+  $: metricsViewProto = $dashboardStore.proto;
+
+  $: selectableMeasures = $allMeasures
+    .filter((m) => m.name !== undefined || m.displayName !== undefined)
     .map((m) =>
       // Note: undefined values are filtered out above, so the
       // empty string fallback is unreachable.
       ({
-        name: m.name ?? "",
-        label: m.label ?? "",
-      })
+        name: m.name || "",
+        label: m.displayName || "",
+      }),
     );
 
-  $: selectedItems = allMeasures?.map((m) => m.name === expandedMeasureName);
-
   $: selectedMeasureLabel =
-    allMeasures?.find((m) => m.name === expandedMeasureName)?.label ??
-    expandedMeasureName ??
-    "";
+    $allMeasures.find((m) => m.name === expandedMeasureName)?.displayName ||
+    expandedMeasureName;
 
   $: excludeMode =
     $dashboardStore?.dimensionFilterExcludeMode.get(dimensionName) ?? false;
@@ -70,75 +90,127 @@
 
   let searchToggle = false;
 
-  let searchText = "";
-  function onSearch() {
-    dispatch("search", searchText);
-  }
-
   function closeSearchBar() {
-    searchText = "";
+    dimensionSearchText.set("");
     searchToggle = false;
-    dispatch("search", searchText);
   }
 
   function onSubmit() {
     if (!areAllTableRowsSelected) {
-      dispatch("toggle-all-search-items");
+      onToggleSearchItems();
       closeSearchBar();
     }
   }
 
   function toggleFilterMode() {
-    cancelDashboardQueries(queryClient, metricViewName);
-    metricsExplorerStore.toggleFilterMode(metricViewName, dimensionName);
+    toggleDimensionFilterMode(dimensionName);
   }
 
-  function switchMeasure(event) {
-    cancelDashboardQueries(queryClient, metricViewName);
-    metricsExplorerStore.setExpandedMeasureName(metricViewName, event.detail);
+  function switchMeasure(measureName: string) {
+    metricsExplorerStore.setExpandedMeasureName(exploreName, measureName);
   }
+
+  let showReplacePivotModal = false;
+  function startPivotForTDD() {
+    const pivot = $dashboardStore?.pivot;
+
+    if (
+      pivot.rows.dimension.length ||
+      pivot.columns.measure.length ||
+      pivot.columns.dimension.length
+    ) {
+      showReplacePivotModal = true;
+    } else {
+      createPivot();
+    }
+  }
+
+  function createPivot() {
+    showReplacePivotModal = false;
+    const dashboardGrain = $dashboardStore?.selectedTimeRange?.interval;
+    if (!dashboardGrain || !expandedMeasureName) return;
+
+    const timeGrain: TimeGrain = TIME_GRAIN[dashboardGrain];
+    const rowDimensions = dimensionName
+      ? [
+          {
+            id: dimensionName,
+            title: $getDimensionDisplayName(dimensionName),
+            type: PivotChipType.Dimension,
+          },
+        ]
+      : [];
+    metricsExplorerStore.createPivot(
+      exploreName,
+      { dimension: rowDimensions },
+      {
+        dimension: [
+          {
+            id: dashboardGrain,
+            title: timeGrain.label,
+            type: PivotChipType.Time,
+          },
+        ],
+        measure: [
+          {
+            id: expandedMeasureName,
+            title: $measureLabel(expandedMeasureName),
+            type: PivotChipType.Measure,
+          },
+        ],
+      },
+    );
+  }
+
+  const handleExportTDD = async (format: V1ExportFormat) => {
+    await exportTDD({
+      ctx: stateManagers,
+      query: exportDash,
+      format,
+      timeDimension: $validSpecStore.data?.metricsView?.timeDimension as string,
+      searchText: $dimensionSearchText,
+    });
+  };
 </script>
 
-<div
-  class="grid grid-auto-cols justify-between grid-flow-col items-center p-1 pb-3 h-11"
->
-  <div class="flex gap-x-3 items-center font-normal text-gray-500">
-    <div class="flex items-center gap-x-2">
+<div class="tdd-header">
+  <div class="flex gap-x-6 items-center font-normal text-gray-500">
+    <div class="flex items-center gap-x-4">
       <div class="flex items-center gap-x-1">
         <Row size="16px" /> Rows
       </div>
 
-      <ComparisonSelector {metricViewName} chipStyle />
+      <ComparisonSelector {exploreName} />
     </div>
 
-    <div class="flex items-center gap-x-2 pl-2">
+    <div class="flex items-center gap-x-4 pl-2">
       <div class="flex items-center gap-x-1">
         <Column size="16px" /> Columns
       </div>
-      <SearchableFilterChip
-        label={selectedMeasureLabel}
-        on:item-clicked={switchMeasure}
-        selectableItems={selectableMeasures}
-        {selectedItems}
-        tooltipText="Choose a measure to display"
-      />
+      <div class="flex items-center gap-x-2">
+        <TimeGrainSelector {exploreName} tdd />
+        <SearchableFilterChip
+          label={selectedMeasureLabel}
+          onSelect={switchMeasure}
+          selectableItems={selectableMeasures}
+          selectedItems={[expandedMeasureName]}
+          tooltipText="Choose a measure to display"
+        />
+      </div>
     </div>
 
-    <!-- Revisit after Pivot table lands -->
-    <!-- <span> | </span>
-    <div>Time</div>
-    <span> : </span>
-    <div>{selectedMeasureLabel}</div> -->
-
     {#if isFetching}
-      <Spinner size="18px" status={EntityStatus.Running} />
+      <DelayedSpinner isLoading={isFetching} size="18px" />
     {/if}
   </div>
 
   {#if comparing === "dimension"}
     <div class="flex items-center mr-4 gap-x-3" style:cursor="pointer">
       {#if !isRowsEmpty}
-        <SelectAllButton {areAllTableRowsSelected} on:toggle-all-search-items />
+        <SelectAllButton
+          {areAllTableRowsSelected}
+          on:toggle-all-search-items={onToggleSearchItems}
+        />
       {/if}
 
       {#if !searchToggle}
@@ -156,11 +228,7 @@
           transition:slideRight={{ leftOffset: 8 }}
           class="flex items-center gap-x-1"
         >
-          <Search
-            bind:value={searchText}
-            on:input={onSearch}
-            on:submit={onSubmit}
-          />
+          <Search bind:value={$dimensionSearchText} on:submit={onSubmit} />
           <button
             class="ui-copy-icon"
             style:cursor="pointer"
@@ -172,7 +240,7 @@
       {/if}
 
       <Tooltip distance={16} location="left">
-        <div class="mr-3 ui-copy-icon" style:grid-column-gap=".4rem">
+        <div class="ui-copy-icon" style:grid-column-gap=".4rem">
           <Switch checked={excludeMode} on:click={() => toggleFilterMode()}>
             Exclude
           </Switch>
@@ -189,6 +257,42 @@
           </TooltipShortcutContainer>
         </TooltipContent>
       </Tooltip>
+
+      {#if $exports}
+        <ExportMenu
+          label="Export table data"
+          onExport={handleExportTDD}
+          includeScheduledReport={$adminServer}
+          queryArgs={$scheduledReportsQueryArgs}
+          {metricsViewProto}
+          {exploreName}
+        />
+      {/if}
+      {#if !hideStartPivotButton}
+        <Button
+          compact
+          type="text"
+          on:click={() => {
+            startPivotForTDD();
+          }}
+        >
+          Start Pivot
+        </Button>
+      {/if}
     </div>
   {/if}
 </div>
+
+<ReplacePivotDialog
+  open={showReplacePivotModal}
+  onCancel={() => {
+    showReplacePivotModal = false;
+  }}
+  onReplace={createPivot}
+/>
+
+<style lang="postcss">
+  .tdd-header {
+    @apply grid justify-between grid-flow-col items-center mr-4 py-2 px-4 h-11;
+  }
+</style>

@@ -25,7 +25,7 @@ function newEditorView(content: string, parent: HTMLElement) {
 /** convenience function for selecting the gutter elements */
 function getLineStatusElements(container: HTMLElement) {
   return container.querySelectorAll(
-    `.${LINE_STATUS_GUTTER_CLASS} > .cm-gutterElement`
+    `.${LINE_STATUS_GUTTER_CLASS} > .cm-gutterElement`,
   ) as NodeListOf<HTMLElement>;
 }
 
@@ -53,7 +53,7 @@ describe("Line Status Gutter Extension (CodeMirror)", () => {
   });
 
   it("renders a set of line statuses", () => {
-    setLineStatuses([{ line: 2, level: "error" }], view);
+    setLineStatuses([{ line: 2, level: "error" }], view, false);
 
     const lineStatuses = getLineStatusElements(container);
     const initialSpacer = lineStatuses[0];
@@ -63,13 +63,14 @@ describe("Line Status Gutter Extension (CodeMirror)", () => {
     expect(lineStatuses.length).toBe(2);
   });
   it("re-renders on calls to setLineStatuses", () => {
-    setLineStatuses([{ line: 2, level: "error" }], view);
+    setLineStatuses([{ line: 2, level: "error" }], view, false);
     setLineStatuses(
       [
         { line: 2, level: "error" },
         { line: 3, level: "error" },
       ],
-      view
+      view,
+      false,
     );
 
     let lineStatuses = getLineStatusElements(container);
@@ -80,14 +81,14 @@ describe("Line Status Gutter Extension (CodeMirror)", () => {
     expect(lineStatuses.length).toBe(3);
 
     // remove all line statuses to reset.
-    setLineStatuses([], view);
+    setLineStatuses([], view, false);
     lineStatuses = getLineStatusElements(container);
     // this should only contain the spacer
     expect(lineStatuses.length).toBe(1);
   });
 
   it("does not render line statuses whose line number is greater than the number of lines in the doc", () => {
-    setLineStatuses([{ line: 100, level: "error" }], view);
+    setLineStatuses([{ line: 100, level: "error" }], view, false);
 
     const lineStatuses = getLineStatusElements(container);
     const initialSpacer = lineStatuses[0];

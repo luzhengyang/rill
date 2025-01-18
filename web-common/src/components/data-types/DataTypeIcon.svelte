@@ -8,18 +8,18 @@
   import TooltipContent from "@rilldata/web-common/components/tooltip/TooltipContent.svelte";
   import {
     copyToClipboard,
-    createShiftClickAction,
-  } from "@rilldata/web-common/lib/actions/shift-click-action";
+    isClipboardApiSupported,
+  } from "@rilldata/web-common/lib/actions/copy-to-clipboard";
   import {
     BOOLEANS,
     FLOATS,
     INTEGERS,
     INTERVALS,
+    STRING_LIKES,
+    TIMESTAMPS,
     isList,
     isNested,
     isStruct,
-    STRING_LIKES,
-    TIMESTAMPS,
   } from "@rilldata/web-common/lib/duckdb-data-types";
   import ListType from "../icons/ListType.svelte";
   import StructType from "../icons/StructType.svelte";
@@ -28,9 +28,10 @@
   import StackingWord from "../tooltip/StackingWord.svelte";
   import TooltipShortcutContainer from "../tooltip/TooltipShortcutContainer.svelte";
   import TooltipTitle from "../tooltip/TooltipTitle.svelte";
+  import { modified } from "@rilldata/web-common/lib/actions/modified-click";
 
   export let color = "text-gray-400";
-  export let type;
+  export let type: string;
   export let suppressTooltip = false;
 
   function typeToSymbol(fieldType: string) {
@@ -52,28 +53,27 @@
       return StructType;
     }
   }
-
-  function onShiftClick() {
-    copyToClipboard(type, `copied type to clipboard`);
-  }
-
-  const { shiftClickAction } = createShiftClickAction();
 </script>
 
-<Tooltip location="left" distance={16} suppress={suppressTooltip}>
-  <div
+<Tooltip
+  location="left"
+  distance={16}
+  suppress={suppressTooltip || !isClipboardApiSupported()}
+>
+  <button
     title={type}
     class="
     {color}
     grid place-items-center rounded"
     style="width: 16px; height: 16px;"
-    use:shiftClickAction
-    on:shift-click={onShiftClick}
+    on:click={modified({
+      shift: () => copyToClipboard(type),
+    })}
   >
     <div>
       <svelte:component this={typeToSymbol(type)} size="16px" />
     </div>
-  </div>
+  </button>
   <TooltipContent maxWidth="300px" slot="tooltip-content">
     <TooltipTitle>
       <div slot="name" class="truncate">
@@ -81,7 +81,9 @@
       </div>
     </TooltipTitle>
     <TooltipShortcutContainer>
-      <div><StackingWord key="shift">Copy</StackingWord> type to clipboard</div>
+      <div>
+        <StackingWord key="shift">Copy</StackingWord> type to clipboard
+      </div>
       <Shortcut>
         <ShiftKey /> + Click
       </Shortcut>

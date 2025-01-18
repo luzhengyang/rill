@@ -15,7 +15,7 @@ export function getUrlForPath(path: string, retainParams = ["features"]): URL {
 
 export function getFullUrlForPath(
   path: string,
-  retainParams = ["features"]
+  retainParams = ["features"],
 ): string {
   const newUrl = getUrlForPath(path, retainParams);
 
@@ -23,4 +23,13 @@ export function getFullUrlForPath(
     return `${newUrl.pathname}${newUrl.search}`;
   }
   return newUrl.pathname;
+}
+
+export function mergeSearchParams(
+  fromSearchParams: URLSearchParams,
+  toSearchParams: URLSearchParams,
+) {
+  fromSearchParams.forEach((value, key) => {
+    toSearchParams.set(key, value);
+  });
 }

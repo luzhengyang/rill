@@ -1,5 +1,7 @@
 import { ResourceKind } from "@rilldata/web-common/features/entity-management/resource-selectors";
 import type {
+  V1ExploreSpec,
+  V1GetExploreResponse,
   V1GetResourceResponse,
   V1MetricsViewSpec,
   V1TimeRangeSummary,
@@ -42,16 +44,50 @@ export class DashboardFetchMocks {
     } as V1GetResourceResponse);
   }
 
+  public mockMetricsExplore(
+    name: string,
+    metricsView: V1MetricsViewSpec,
+    explore: V1ExploreSpec,
+  ) {
+    this.responses.set(`resources__explore__${name}`, {
+      metricsView: {
+        meta: {
+          name: {
+            kind: ResourceKind.MetricsView,
+            name,
+          },
+        },
+        metricsView: {
+          state: {
+            validSpec: metricsView,
+          },
+        },
+      },
+      explore: {
+        meta: {
+          name: {
+            kind: ResourceKind.Explore,
+            name,
+          },
+        },
+        explore: {
+          state: {
+            validSpec: explore,
+          },
+        },
+      },
+    } as V1GetExploreResponse);
+  }
+
   public mockTimeRangeSummary(
-    tableName: string,
-    columnName: string,
-    resp: V1TimeRangeSummary
+    metricsViewName: string,
+    resp: V1TimeRangeSummary,
   ) {
     this.responses.set(
-      `queries__time-range-summary__${tableName}__${columnName}`,
+      `queries__metrics-views__time-range-summary__${metricsViewName}`,
       {
         timeRangeSummary: resp,
-      }
+      },
     );
   }
 
@@ -65,19 +101,16 @@ export class DashboardFetchMocks {
         key = type + "__" + u.searchParams.get("name.name");
         break;
 
+      case "resources":
+        key = type + "__" + parts[0] + "__" + u.searchParams.get("name");
+        break;
+
       case "catalog":
         key = type + "__" + parts[0];
         break;
 
       case "queries":
-        key =
-          type +
-          "__" +
-          parts[0] +
-          "__" +
-          parts[2] +
-          "__" +
-          (u.searchParams.get("columnName") ?? "");
+        key = type + "__" + parts[0] + "__" + parts[2] + "__" + parts[1];
         break;
 
       case "metrics-views":
@@ -96,6 +129,7 @@ export class DashboardFetchMocks {
       ready: true,
       ok: true,
       json: () => this.responses.get(key),
+      headers: new Map([["content-type", "application/json"]]),
     };
   }
 }

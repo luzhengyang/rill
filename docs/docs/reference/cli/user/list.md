@@ -4,7 +4,7 @@ title: rill user list
 ---
 ## rill user list
 
-List
+List users
 
 ```
 rill user list [flags]
@@ -13,6 +13,7 @@ rill user list [flags]
 ### Flags
 
 ```
+      --group string        User group
       --org string          Organization
       --page-size uint32    Number of users to return per page (default 50)
       --page-token string   Pagination token
@@ -22,7 +23,8 @@ rill user list [flags]
 ### Global flags
 
 ```
-      --api-token string   Token for authenticating with the admin API
+      --api-token string   Token for authenticating with the cloud API
+      --format string      Output format (options: "human", "json", "csv") (default "human")
   -h, --help               Print usage
       --interactive        Prompt for missing required parameters (default true)
 ```

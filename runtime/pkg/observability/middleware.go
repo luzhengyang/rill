@@ -3,6 +3,7 @@ package observability
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"runtime"
@@ -138,7 +139,7 @@ func LoggingStreamServerInterceptor(logger *zap.Logger) grpc.StreamServerInterce
 				zap.Duration("duration", time.Since(start)),
 				zap.Error(logErr),
 			)
-			logger.Log(lvl, "grpc finished call")
+			logger.Log(lvl, "grpc finished call", fields...)
 		}()
 
 		// Add log fields to context
@@ -215,13 +216,13 @@ func LoggingMiddleware(logger *zap.Logger, next http.Handler) http.Handler {
 				wrapped.status = http.StatusInternalServerError
 				_, _ = w.Write([]byte(http.StatusText(http.StatusInternalServerError)))
 
-				// Add error field
-				switch v := err.(type) {
-				case error:
-					fields = append(fields, zap.Error(v))
-				default:
-					fields = append(fields, zap.Any("error", v))
-				}
+				// Get stacktrace
+				stack := make([]byte, 64<<10)
+				stack = stack[:runtime.Stack(stack, false)]
+
+				// Add log fieds
+				err := fmt.Errorf("panic caught: %v", err)
+				fields = append(fields, zap.Error(err), zap.String("stack", string(stack)))
 			}
 
 			// Get status
@@ -313,6 +314,6 @@ func AddRequestAttributes(ctx context.Context, attrs ...attribute.KeyValue) {
 		}
 	}
 
-	// Add attributes as activity dimensions
-	activity.WithDims(ctx, attrs...)
+	// Add attributes for emitted events
+	activity.SetAttributes(ctx, attrs...)
 }

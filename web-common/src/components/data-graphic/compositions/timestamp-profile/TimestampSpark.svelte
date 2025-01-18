@@ -11,6 +11,7 @@
    */
   import { SimpleDataGraphic } from "../../elements";
   import { Area, Line } from "../../marks";
+  import { ScaleType } from "../../state";
 
   export let data;
 
@@ -43,7 +44,7 @@
       start = 0,
       opacity = 0,
       scaleDown = false,
-    } = {}
+    } = {},
   ) {
     const style = getComputedStyle(node);
     const target_opacity = +style.opacity;
@@ -70,8 +71,8 @@
 
 {#if data.length}
   <SimpleDataGraphic
-    xType="date"
-    yType="number"
+    xType={ScaleType.DATE}
+    yType={ScaleType.NUMBER}
     {width}
     {height}
     yMin={0}

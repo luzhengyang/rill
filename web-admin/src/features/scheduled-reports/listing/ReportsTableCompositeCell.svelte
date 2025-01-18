@@ -20,17 +20,19 @@
   const humanReadableFrequency = cronstrue.toString(frequency);
 </script>
 
-<a href={`reports/${id}`} class="flex flex-col gap-y-0.5 group px-4 py-[5px]">
+<a href={`reports/${id}`} class="flex flex-col gap-y-0.5 group px-4 py-2">
   <div class="flex gap-x-2 items-center">
     <ReportIcon size={"14px"} className="text-slate-500" />
-    <div class="text-gray-700 text-sm font-semibold group-hover:text-blue-600">
+    <div
+      class="text-gray-700 text-sm font-semibold group-hover:text-primary-600"
+    >
       {title}
     </div>
     {#if lastRun}
       {#if lastRunErrorMessage}
         <CancelCircleInverse className="text-red-500" />
       {:else}
-        <CheckCircleOutline className="text-blue-500" />
+        <CheckCircleOutline className="text-primary-500" />
       {/if}
     {/if}
   </div>

@@ -3,12 +3,14 @@
  * the `ErrorBoundary` component catches and routes to the `ErrorPage`.
  */
 
-import { derived, writable, Writable } from "svelte/store";
+import { derived, writable, type Writable } from "svelte/store";
 
 export interface ErrorStoreState {
   statusCode: number | null;
   header: string;
   body: string;
+  detail?: string;
+  fatal?: boolean;
 }
 
 export interface ErrorStore extends Writable<ErrorStoreState> {
@@ -20,10 +22,11 @@ const createErrorStore = (): ErrorStore => {
     statusCode: null,
     header: "",
     body: "",
+    fatal: false,
   });
 
   const reset = (): void => {
-    set({ statusCode: null, header: "", body: "" });
+    set({ statusCode: null, header: "", body: "", fatal: false });
   };
 
   return { subscribe, set, update, reset };

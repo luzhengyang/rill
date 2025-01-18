@@ -3,7 +3,7 @@ import {
   Decoration,
   EditorView,
   ViewPlugin,
-  ViewUpdate,
+  type ViewUpdate,
 } from "@codemirror/view";
 import { lineStatusesStateField, updateLineStatuses } from "./state";
 
@@ -55,6 +55,6 @@ export function createLineStatusHighlighter() {
         }
       }
     },
-    { decorations: (v) => v.decorations }
+    { decorations: (v) => v.decorations },
   );
 }

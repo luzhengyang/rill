@@ -1,30 +1,29 @@
 <script lang="ts">
   import { page } from "$app/stores";
   import ContentContainer from "@rilldata/web-admin/components/layout/ContentContainer.svelte";
-  import VerticalScrollContainer from "@rilldata/web-common/layout/VerticalScrollContainer.svelte";
-  import { createAdminServiceGetProject } from "../../../client";
   import DashboardsTable from "../../../features/dashboards/listing/DashboardsTable.svelte";
-  import RedeployProjectCta from "../../../features/projects/RedeployProjectCTA.svelte";
+  import { useDashboardsV2 } from "@rilldata/web-admin/features/dashboards/listing/selectors";
+  import { runtime } from "@rilldata/web-common/runtime-client/runtime-store";
 
-  $: organization = $page.params.organization;
-  $: project = $page.params.project;
+  $: ({
+    params: { project },
+  } = $page);
+  $: ({ instanceId } = $runtime);
 
-  $: proj = createAdminServiceGetProject(organization, project);
-  $: isProjectDeployed = $proj?.data && $proj.data.prodDeployment;
-  $: isProjectHibernating = $proj?.data && !$proj.data.prodDeployment;
+  $: query = useDashboardsV2(instanceId);
+  $: ({ data } = $query);
 </script>
 
 <svelte:head>
   <title>{project} overview - Rill</title>
 </svelte:head>
-<VerticalScrollContainer>
-  {#if isProjectHibernating}
-    <RedeployProjectCta {organization} {project} />
-  {:else if isProjectDeployed}
-    <ContentContainer>
-      <div class="flex flex-col items-center gap-y-4">
-        <DashboardsTable {organization} {project} />
-      </div>
-    </ContentContainer>
-  {/if}
-</VerticalScrollContainer>
+
+<ContentContainer
+  maxWidth={800}
+  title="Project dashboards"
+  showTitle={data?.length > 0}
+>
+  <div class="flex flex-col items-center gap-y-4">
+    <DashboardsTable />
+  </div>
+</ContentContainer>

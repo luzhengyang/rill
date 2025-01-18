@@ -1,0 +1,75 @@
+services:
+  postgres:
+    image: postgres:17
+    restart: always
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    ports:
+      - '5432:5432'
+    volumes:
+      - ../../../../${RILL_DEVTOOL_STATE_DIRECTORY}/postgres:/var/lib/postgresql/data
+  e2e-postgres:
+    image: postgres:17
+    restart: always
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    ports:
+      - '6432:5432'
+  redis:
+    image: redis
+    restart: always
+    ports:
+      - '6379:6379'
+  zipkin:
+    container_name: zipkin
+    image: openzipkin/zipkin:3
+    restart: always
+    ports:
+      - "9411:9411"
+  prometheus:
+    container_name: prometheus
+    image: prom/prometheus:v2.55.1
+    restart: always
+    volumes:
+      - ./prometheus.yaml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9412:9090"
+  riverui:
+    container_name: riverui
+    image: ghcr.io/riverqueue/riverui:latest
+    restart: always
+    environment:
+      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/postgres
+    ports:
+      - 7070:8080
+  otel-collector:
+    container_name: otel-collector
+    image: otel/opentelemetry-collector:0.90.0
+    restart: always
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml
+    ports:
+      - "1888:1888"   # pprof extension
+      - "8889:8889"   # Prometheus exporter metrics
+      - "13133:13133" # health_check extension
+      - "4317:4317"   # OTLP gRPC receiver
+      - "55679:55679" # zpages extension
+    depends_on:
+      - zipkin
+  stripe-cli:
+    image: stripe/stripe-cli:v1.21.11
+    command: listen --forward-to http://host.docker.internal:8080/payment/webhook --config /etc/stripe-config.toml
+    volumes:
+      - ../../../../${RILL_DEVTOOL_STATE_DIRECTORY}/stripe-config.toml:/etc/stripe-config.toml
+  clickhouse:
+    image: 'clickhouse/clickhouse-server:24.11.1.2557'
+    volumes:
+      - ./clickhouse-config.xml:/etc/clickhouse-server/config.d/config.xml
+      - ./clickhouse-users.xml:/etc/clickhouse-server/users.d/users.xml
+      - ../../../../${RILL_DEVTOOL_STATE_DIRECTORY}/clickhouse:/var/lib/clickhouse
+    ports:
+      - '9000:9000' # Native port
+      - '8123:8123' # HTTP port

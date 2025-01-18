@@ -1,219 +1,190 @@
-<!-- @component
-The main feature-set component for dashboard filters
- -->
 <script lang="ts">
-  import {
-    Chip,
-    ChipContainer,
-    RemovableListChip,
-  } from "@rilldata/web-common/components/chip";
-  import {
-    defaultChipColors,
-    excludeChipColors,
-  } from "@rilldata/web-common/components/chip/chip-types";
+  import Button from "@rilldata/web-common/components/button/Button.svelte";
+  import Calendar from "@rilldata/web-common/components/icons/Calendar.svelte";
   import Filter from "@rilldata/web-common/components/icons/Filter.svelte";
-  import FilterRemove from "@rilldata/web-common/components/icons/FilterRemove.svelte";
-  import { useMetaQuery, getFilterSearchList } from "../selectors/index";
+  import AdvancedFilter from "@rilldata/web-common/features/dashboards/filters/AdvancedFilter.svelte";
+  import MeasureFilter from "@rilldata/web-common/features/dashboards/filters/measure-filters/MeasureFilter.svelte";
+  import type { MeasureFilterEntry } from "@rilldata/web-common/features/dashboards/filters/measure-filters/measure-filter-entry";
+  import { isExpressionUnsupported } from "@rilldata/web-common/features/dashboards/stores/filter-utils";
   import { getMapFromArray } from "@rilldata/web-common/lib/arrayUtils";
-  import type {
-    MetricsViewSpecDimensionV2,
-    V1MetricsViewFilter,
-  } from "@rilldata/web-common/runtime-client";
+  import { runtime } from "@rilldata/web-common/runtime-client/runtime-store";
   import { flip } from "svelte/animate";
   import { fly } from "svelte/transition";
-  import { getDisplayName } from "./getDisplayName";
+  import { useModelHasTimeSeries } from "../selectors";
   import { getStateManagers } from "../state-managers/state-managers";
-  import {
-    clearAllFilters,
-    toggleDimensionValue,
-    toggleFilterMode,
-  } from "../actions";
+  import TimeGrainSelector from "../time-controls/TimeGrainSelector.svelte";
+  import ComparisonPill from "../time-controls/comparison-pill/ComparisonPill.svelte";
+  import SuperPill from "../time-controls/super-pill/SuperPill.svelte";
+  import { useTimeControlStore } from "../time-controls/time-control-store";
   import FilterButton from "./FilterButton.svelte";
+  import DimensionFilter from "./dimension-filters/DimensionFilter.svelte";
 
-  const StateManagers = getStateManagers();
-  const {
-    dashboardStore,
-    actions: {
-      dimensionsFilter: { toggleDimensionNameSelection },
-    },
-  } = StateManagers;
+  export let readOnly = false;
 
   /** the height of a row of chips */
   const ROW_HEIGHT = "26px";
-  /** the minimum container height */
-  const MIN_CONTAINER_HEIGHT = "34px";
 
-  const metaQuery = useMetaQuery(StateManagers);
-  $: dimensions = $metaQuery.data?.dimensions ?? [];
+  const StateManagers = getStateManagers();
+  const {
+    metricsViewName,
+    exploreName,
+    actions: {
+      dimensionsFilter: {
+        toggleDimensionValueSelection,
+        removeDimensionFilter,
+        toggleDimensionFilterMode,
+      },
+      measuresFilter: { setMeasureFilter, removeMeasureFilter },
+      filters: { clearAllFilters },
+    },
+    selectors: {
+      dimensions: { allDimensions },
+      dimensionFilters: {
+        getDimensionFilterItems,
+        getAllDimensionFilterItems,
+        isFilterExcludeMode,
+      },
+      measures: { allMeasures },
+      measureFilters: { getMeasureFilterItems, getAllMeasureFilterItems },
+      pivot: { showPivot },
+    },
+    dashboardStore,
+  } = StateManagers;
 
-  function isFiltered(filters: V1MetricsViewFilter): boolean {
-    if (!filters || !filters.include || !filters.exclude) return false;
-    return filters.include.length > 0 || filters.exclude.length > 0;
-  }
+  const timeControlsStore = useTimeControlStore(StateManagers);
 
-  let searchText = "";
-  let allValues: string[] | null = null;
-  let activeDimensionName: string;
+  $: ({
+    selectedTimeRange,
+    allTimeRange,
+    showTimeComparison,
+    selectedComparisonTimeRange,
+    minTimeGrain,
+  } = $timeControlsStore);
 
-  $: activeColumn =
-    dimensions.find((d) => d.name === activeDimensionName)?.column ??
-    activeDimensionName;
+  $: ({ instanceId } = $runtime);
 
-  let topListQuery: ReturnType<typeof getFilterSearchList> | undefined;
-  $: if (activeDimensionName) {
-    topListQuery = getFilterSearchList(StateManagers, {
-      dimension: activeDimensionName,
-      searchText,
-      addNull: "null".includes(searchText),
-    });
-  }
+  $: dimensions = $allDimensions;
+  $: dimensionIdMap = getMapFromArray(
+    dimensions,
+    (dimension) => (dimension.name || dimension.column) as string,
+  );
 
-  $: if (!$topListQuery?.isFetching) {
-    const topListData = $topListQuery?.data?.data ?? [];
-    allValues = topListData.map((datum) => datum[activeColumn]) ?? [];
-  }
+  $: measures = $allMeasures;
+  $: measureIdMap = getMapFromArray(measures, (m) => m.name as string);
 
-  $: hasFilters = isFiltered($dashboardStore.filters);
+  $: currentDimensionFilters = $getDimensionFilterItems(dimensionIdMap);
+  $: allDimensionFilters = $getAllDimensionFilterItems(
+    currentDimensionFilters,
+    dimensionIdMap,
+  );
 
-  /** prune the values and prepare for templating */
-  let currentDimensionFilters: {
-    name: string;
-    label: string;
-    selectedValues: any[];
-    filterType: string;
-  }[] = [];
+  $: currentMeasureFilters = $getMeasureFilterItems(measureIdMap);
+  $: allMeasureFilters = $getAllMeasureFilterItems(
+    currentMeasureFilters,
+    measureIdMap,
+  );
 
-  $: {
-    const dimensionIdMap = getMapFromArray(
-      dimensions,
-      (dimension) => dimension.name
-    );
+  // hasFilter only checks for complete filters and excludes temporary ones
+  $: hasFilters =
+    currentDimensionFilters.length > 0 || currentMeasureFilters.length > 0;
+  $: metricTimeSeries = useModelHasTimeSeries(instanceId, $metricsViewName);
+  $: hasTimeSeries = $metricTimeSeries.data;
 
-    const currentDimensionIncludeFilters =
-      $dashboardStore?.filters?.include
-        ?.filter((dimensionValues) => dimensionValues.name !== undefined)
-        .map((dimensionValues) => {
-          const name = dimensionValues.name as string;
-          return {
-            name,
-            label: getDisplayName(
-              dimensionIdMap.get(name) as MetricsViewSpecDimensionV2
-            ),
-            selectedValues: dimensionValues.in as any[],
-            filterType: "include",
-          };
-        }) ?? [];
+  $: isComplexFilter = isExpressionUnsupported($dashboardStore.whereFilter);
 
-    const currentDimensionExcludeFilters =
-      $dashboardStore?.filters?.exclude
-        ?.filter((dimensionValues) => dimensionValues.name !== undefined)
-        .map((dimensionValues) => {
-          const name = dimensionValues.name as string;
-          return {
-            name,
-            label: getDisplayName(
-              dimensionIdMap.get(name) as MetricsViewSpecDimensionV2
-            ),
-            selectedValues: dimensionValues.in as any[],
-            filterType: "exclude",
-          };
-        }) ?? [];
-
-    currentDimensionFilters = [
-      ...currentDimensionIncludeFilters,
-      ...currentDimensionExcludeFilters,
-    ];
-    // sort based on name to make sure toggling include/exclude is not jarring
-    currentDimensionFilters.sort((a, b) => (a.name > b.name ? 1 : -1));
-  }
-
-  function setActiveDimension(name, value = "") {
-    activeDimensionName = name;
-    searchText = value;
-  }
-
-  function getColorForChip(isInclude) {
-    return isInclude ? defaultChipColors : excludeChipColors;
+  function handleMeasureFilterApply(
+    dimension: string,
+    measureName: string,
+    oldDimension: string,
+    filter: MeasureFilterEntry,
+  ) {
+    if (oldDimension && oldDimension !== dimension) {
+      removeMeasureFilter(oldDimension, measureName);
+    }
+    setMeasureFilter(dimension, filter);
   }
 </script>
 
-<section
-  class="pl-2 grid gap-x-2 items-start"
-  style:grid-template-columns="max-content auto"
-  style:min-height={MIN_CONTAINER_HEIGHT}
->
-  <div
-    class="grid items-center place-items-center"
-    class:ui-copy-icon={hasFilters}
-    class:ui-copy-icon-inactive={!hasFilters}
-    style:height={ROW_HEIGHT}
-    style:width={ROW_HEIGHT}
-  >
-    <Filter size="16px" />
-  </div>
+<div class="flex flex-col gap-y-2 size-full">
+  {#if hasTimeSeries}
+    <div class="flex flex-row flex-wrap gap-x-2 gap-y-1.5 items-center">
+      <Calendar size="16px" />
+      {#if allTimeRange?.start && allTimeRange?.end}
+        <SuperPill {allTimeRange} {selectedTimeRange} />
+        <ComparisonPill
+          {allTimeRange}
+          {selectedTimeRange}
+          showTimeComparison={!!showTimeComparison}
+          {selectedComparisonTimeRange}
+        />
+        {#if !$showPivot && minTimeGrain}
+          <TimeGrainSelector exploreName={$exploreName} />
+        {/if}
+      {/if}
+    </div>
+  {/if}
 
-  <ChipContainer>
-    {#if !currentDimensionFilters.length}
-      <div
-        in:fly|local={{ duration: 200, x: 8 }}
-        class="ui-copy-disabled grid items-center"
-        style:min-height={ROW_HEIGHT}
-      >
-        No filters selected
-      </div>
-    {:else}
-      {#each currentDimensionFilters as { name, label, selectedValues, filterType } (name)}
-        {@const isInclude = filterType === "include"}
-        <div animate:flip={{ duration: 200 }}>
-          <RemovableListChip
-            on:toggle={() => toggleFilterMode(StateManagers, name)}
-            on:remove={() => toggleDimensionNameSelection(name)}
-            on:apply={(event) => {
-              toggleDimensionValue(StateManagers, name, event.detail);
-            }}
-            on:search={(event) => {
-              setActiveDimension(name, event.detail);
-            }}
-            on:click={() => {
-              setActiveDimension(name, "");
-            }}
-            on:mount={() => {
-              setActiveDimension(name);
-            }}
-            typeLabel="dimension"
-            name={isInclude ? label : `Exclude ${label}`}
-            excludeMode={isInclude ? false : true}
-            colors={getColorForChip(isInclude)}
-            label="View filter"
-            {selectedValues}
-            {allValues}
-          >
-            <svelte:fragment slot="body-tooltip-content">
-              Click to edit the the filters in this dimension
-            </svelte:fragment>
-          </RemovableListChip>
-        </div>
-      {/each}
+  <div class="relative flex flex-row gap-x-2 gap-y-2 items-start">
+    {#if !readOnly}
+      <Filter size="16px" className="ui-copy-icon flex-none mt-[5px]" />
     {/if}
-    <FilterButton />
-    <!-- if filters are present, place a chip at the end of the flex container 
-      that enables clearing all filters -->
-    {#if hasFilters}
-      <div class="ml-auto">
-        <Chip
-          bgBaseClass="surface"
-          bgHoverClass="hover:bg-gray-100 hover:dark:bg-gray-700"
-          textClass="ui-copy-disabled-faint hover:text-gray-500 dark:text-gray-500"
-          bgActiveClass="bg-gray-200 dark:bg-gray-600"
-          outlineClass="outline-gray-400"
-          on:click={() => clearAllFilters(StateManagers)}
+    <div class="relative flex flex-row flex-wrap gap-x-2 gap-y-2">
+      {#if isComplexFilter}
+        <AdvancedFilter advancedFilter={$dashboardStore.whereFilter} />
+      {:else if !allDimensionFilters.length && !allMeasureFilters.length}
+        <div
+          in:fly={{ duration: 200, x: 8 }}
+          class="ui-copy-disabled grid ml-1 items-center"
+          style:min-height={ROW_HEIGHT}
         >
-          <span slot="icon" class="ui-copy-disabled-faint">
-            <FilterRemove size="16px" />
-          </span>
-          <svelte:fragment slot="body">Clear filters</svelte:fragment>
-        </Chip>
-      </div>
-    {/if}
-  </ChipContainer>
-</section>
+          No filters selected
+        </div>
+      {:else}
+        {#each allDimensionFilters as { name, label, selectedValues } (name)}
+          {@const dimension = dimensions.find(
+            (d) => d.name === name || d.column === name,
+          )}
+          {@const dimensionName = dimension?.name || dimension?.column}
+          <div animate:flip={{ duration: 200 }}>
+            {#if dimensionName}
+              <DimensionFilter
+                {readOnly}
+                {name}
+                {label}
+                {selectedValues}
+                excludeMode={$isFilterExcludeMode(name)}
+                onRemove={() => removeDimensionFilter(name)}
+                onToggleFilterMode={() => toggleDimensionFilterMode(name)}
+                onSelect={(value) =>
+                  toggleDimensionValueSelection(name, value, true)}
+              />
+            {/if}
+          </div>
+        {/each}
+        {#each allMeasureFilters as { name, label, dimensionName, filter } (name)}
+          <div animate:flip={{ duration: 200 }}>
+            <MeasureFilter
+              allDimensions={dimensions}
+              {name}
+              {label}
+              {dimensionName}
+              {filter}
+              onRemove={() => removeMeasureFilter(dimensionName, name)}
+              onApply={({ dimension, oldDimension, filter }) =>
+                handleMeasureFilterApply(dimension, name, oldDimension, filter)}
+            />
+          </div>
+        {/each}
+      {/if}
+
+      {#if !readOnly}
+        <FilterButton />
+        <!-- if filters are present, place a chip at the end of the flex container 
+      that enables clearing all filters -->
+        {#if hasFilters}
+          <Button type="text" on:click={clearAllFilters}>Clear filters</Button>
+        {/if}
+      {/if}
+    </div>
+  </div>
+</div>

@@ -1,21 +1,33 @@
+import type { PathOption } from "@rilldata/web-common/components/navigation/breadcrumbs/types";
+import {
+  ComparisonDeltaAbsoluteSuffix,
+  ComparisonDeltaPreviousSuffix,
+  ComparisonDeltaRelativeSuffix,
+} from "@rilldata/web-common/features/dashboards/filters/measure-filters/measure-filter-entry";
+import { URI_DIMENSION_SUFFIX } from "@rilldata/web-common/features/dashboards/leaderboard/leaderboard-utils";
+import { sanitiseExpression } from "@rilldata/web-common/features/dashboards/stores/filter-utils";
+import { DashboardState_LeaderboardSortType } from "@rilldata/web-common/proto/gen/rill/ui/v1/dashboard_pb";
 import type {
-  QueryServiceMetricsViewComparisonBody,
-  MetricsViewDimension,
-  V1MetricsViewFilter,
+  MetricsViewSpecDimensionV2,
   MetricsViewSpecMeasureV2,
+  QueryServiceMetricsViewAggregationBody,
+  V1Expression,
   V1MetricsViewAggregationMeasure,
+  V1Resource,
 } from "@rilldata/web-common/runtime-client";
-import type { TimeControlState } from "./time-controls/time-control-store";
-import { getQuerySortType } from "./leaderboard/leaderboard-utils";
 import { SortType } from "./proto-state/derived-types";
+import type { TimeControlState } from "./time-controls/time-control-store";
+
+const countRegex = /count(?=[^(]*\()/i;
+const sumRegex = /sum(?=[^(]*\()/i;
 
 export function isSummableMeasure(measure: MetricsViewSpecMeasureV2): boolean {
+  const expression = measure.expression?.toLowerCase();
   return (
-    measure?.expression.toLowerCase()?.includes("count(") ||
-    measure?.expression?.toLowerCase()?.includes("sum(")
+    !!(expression?.match(countRegex) || expression?.match(sumRegex)) ||
+    Boolean(measure.validPercentOfTotal)
   );
 }
-
 /**
  * Returns a sanitized column name appropriate for use in e.g. filters.
  *
@@ -23,8 +35,10 @@ export function isSummableMeasure(measure: MetricsViewSpecMeasureV2): boolean {
  * becuase it is used in a few places and we want to make sure we
  * are consistent in how we handle this.
  */
-export function getDimensionColumn(dimension: MetricsViewDimension): string {
-  return dimension?.column || dimension?.name;
+export function getDimensionColumn(
+  dimension: MetricsViewSpecDimensionV2,
+): string {
+  return (dimension?.column || dimension?.name) as string;
 }
 
 export function prepareSortedQueryBody(
@@ -35,50 +49,142 @@ export function prepareSortedQueryBody(
   sortMeasureName: string | null,
   sortType: SortType,
   sortAscending: boolean,
-  filterForDimension: V1MetricsViewFilter
-): QueryServiceMetricsViewComparisonBody {
-  let comparisonTimeRange = {
-    start: timeControls.comparisonTimeStart,
-    end: timeControls.comparisonTimeEnd,
-  };
+  whereFilterForDimension: V1Expression,
+  limit: number,
+): QueryServiceMetricsViewAggregationBody {
+  const measures = measureNames.map(
+    (n) =>
+      <V1MetricsViewAggregationMeasure>{
+        name: n,
+      },
+  );
 
-  // FIXME: As a temporary way of enabling sorting by dimension values,
-  // Benjamin and Egor put in a patch that will allow us to use the
-  // dimension name as the measure name. This will need to be updated
-  // once they have stabilized the API.
+  let apiSortName = sortMeasureName;
   if (sortType === SortType.DIMENSION || sortMeasureName === null) {
-    sortMeasureName = dimensionName;
-    // note also that we need to remove the comparison time range
-    // when sorting by dimension values, or the query errors
-    comparisonTimeRange = undefined;
+    apiSortName = dimensionName;
   }
 
-  const querySortType = getQuerySortType(sortType);
+  if (
+    timeControls.showTimeComparison &&
+    !!timeControls.selectedComparisonTimeRange &&
+    sortMeasureName
+  ) {
+    // insert beside the correct measure
+    measures.splice(
+      measures.findIndex((m) => m.name === sortMeasureName),
+      0,
+      ...getComparisonRequestMeasures(sortMeasureName),
+    );
+    if (apiSortName === sortMeasureName) {
+      // only update if the sort was on measure
+      switch (sortType) {
+        case DashboardState_LeaderboardSortType.DELTA_ABSOLUTE:
+          apiSortName += ComparisonDeltaAbsoluteSuffix;
+          break;
+        case DashboardState_LeaderboardSortType.DELTA_PERCENT:
+          apiSortName += ComparisonDeltaRelativeSuffix;
+          break;
+      }
+    }
+  }
 
   return {
-    dimension: {
-      name: dimensionName,
-    },
-    measures: measureNames.map(
-      (n) =>
-        <V1MetricsViewAggregationMeasure>{
-          name: n,
-        }
-    ),
+    dimensions: [
+      {
+        name: dimensionName,
+      },
+    ],
+    measures,
     timeRange: {
       start: timeControls.timeStart,
       end: timeControls.timeEnd,
     },
-    comparisonTimeRange,
-    sort: [
-      {
-        desc: !sortAscending,
-        name: sortMeasureName,
-        sortType: querySortType,
-      },
-    ],
-    filter: filterForDimension,
-    limit: "250",
+    ...(timeControls.selectedComparisonTimeRange &&
+    timeControls.showTimeComparison
+      ? {
+          comparisonTimeRange: {
+            start: timeControls.comparisonTimeStart,
+            end: timeControls.comparisonTimeEnd,
+          },
+        }
+      : {}),
+    sort: apiSortName
+      ? [
+          {
+            desc: !sortAscending,
+            name: apiSortName,
+          },
+        ]
+      : [],
+    where: sanitiseExpression(whereFilterForDimension, undefined),
+    limit: limit.toString(),
     offset: "0",
   };
+}
+
+/**
+ * Gets comparison based measures used in MetricsViewAggregationRequest
+ */
+export function getComparisonRequestMeasures(
+  measureName: string,
+): V1MetricsViewAggregationMeasure[] {
+  return [
+    {
+      name: measureName + ComparisonDeltaPreviousSuffix,
+      comparisonValue: {
+        measure: measureName,
+      },
+    },
+    {
+      name: measureName + ComparisonDeltaAbsoluteSuffix,
+      comparisonDelta: {
+        measure: measureName,
+      },
+    },
+    {
+      name: measureName + ComparisonDeltaRelativeSuffix,
+      comparisonRatio: {
+        measure: measureName,
+      },
+    },
+  ];
+}
+
+export function getURIRequestMeasure(
+  dimensionName: string,
+): V1MetricsViewAggregationMeasure {
+  return {
+    name: dimensionName + URI_DIMENSION_SUFFIX,
+    uri: {
+      dimension: dimensionName,
+    },
+  };
+}
+
+export function getBreadcrumbOptions(
+  exploreResources: V1Resource[],
+  canvasResources: V1Resource[],
+): Map<string, PathOption> {
+  const exploreOptions = exploreResources.reduce((map, exploreResource) => {
+    const name = exploreResource.meta?.name?.name ?? "";
+    const label =
+      exploreResource.explore?.state?.validSpec?.displayName || name;
+
+    if (label && name)
+      map.set(name.toLowerCase(), { label, section: "explore", depth: 0 });
+
+    return map;
+  }, new Map<string, PathOption>());
+
+  const canvasOptions = canvasResources.reduce((map, canvasResource) => {
+    const name = canvasResource.meta?.name?.name ?? "";
+    const label = canvasResource?.canvas?.spec?.displayName || name;
+
+    if (label && name)
+      map.set(name.toLowerCase(), { label, section: "custom", depth: 0 });
+
+    return map;
+  }, new Map<string, PathOption>());
+
+  return new Map([...exploreOptions, ...canvasOptions]);
 }

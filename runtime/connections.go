@@ -3,13 +3,18 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"maps"
+	"strconv"
 	"strings"
 
 	runtimev1 "github.com/rilldata/rill/proto/gen/rill/runtime/v1"
+	"github.com/rilldata/rill/runtime/compilers/rillv1"
 	"github.com/rilldata/rill/runtime/drivers"
 )
 
-var ErrAdminNotConfigured = fmt.Errorf("an admin store is not configured for this instance")
+var ErrAdminNotConfigured = fmt.Errorf("an admin service is not configured for this instance")
+
+var ErrAINotConfigured = fmt.Errorf("an AI service is not configured for this instance")
 
 func (r *Runtime) AcquireSystemHandle(ctx context.Context, connector string) (drivers.Handle, func(), error) {
 	for _, c := range r.opts.SystemConnectors {
@@ -19,7 +24,12 @@ func (r *Runtime) AcquireSystemHandle(ctx context.Context, connector string) (dr
 				cfg[strings.ToLower(k)] = v
 			}
 			cfg["allow_host_access"] = r.opts.AllowHostAccess
-			return r.getConnection(ctx, "", c.Type, cfg, true)
+			return r.getConnection(ctx, cachedConnectionConfig{
+				instanceID: "",
+				name:       connector,
+				driver:     c.Type,
+				config:     cfg,
+			})
 		}
 	}
 	return nil, nil, fmt.Errorf("connector %s doesn't exist", connector)
@@ -27,7 +37,7 @@ func (r *Runtime) AcquireSystemHandle(ctx context.Context, connector string) (dr
 
 // AcquireHandle returns instance specific handle
 func (r *Runtime) AcquireHandle(ctx context.Context, instanceID, connector string) (drivers.Handle, func(), error) {
-	driver, cfg, err := r.connectorConfig(ctx, instanceID, connector)
+	cfg, err := r.ConnectorConfig(ctx, instanceID, connector)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -36,7 +46,14 @@ func (r *Runtime) AcquireHandle(ctx context.Context, instanceID, connector strin
 		// So we take this moment to make sure the ctx gets checked for cancellation at least every once in a while.
 		return nil, nil, ctx.Err()
 	}
-	return r.getConnection(ctx, instanceID, driver, cfg, false)
+	return r.getConnection(ctx, cachedConnectionConfig{
+		instanceID:    instanceID,
+		name:          connector,
+		driver:        cfg.Driver,
+		config:        cfg.Resolve(),
+		provision:     cfg.Provision,
+		provisionArgs: cfg.ProvisionArgs,
+	})
 }
 
 func (r *Runtime) Repo(ctx context.Context, instanceID string) (drivers.RepoStore, func(), error) {
@@ -78,19 +95,50 @@ func (r *Runtime) Admin(ctx context.Context, instanceID string) (drivers.AdminSe
 	admin, ok := conn.AsAdmin(instanceID)
 	if !ok {
 		release()
-		return nil, nil, fmt.Errorf("connector %q is not a valid admin store", inst.AdminConnector)
+		return nil, nil, fmt.Errorf("connector %q is not a valid admin service", inst.AdminConnector)
 	}
 
 	return admin, release, nil
 }
 
-func (r *Runtime) OLAP(ctx context.Context, instanceID string) (drivers.OLAPStore, func(), error) {
+func (r *Runtime) AI(ctx context.Context, instanceID string) (drivers.AIService, func(), error) {
 	inst, err := r.Instance(ctx, instanceID)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	conn, release, err := r.AcquireHandle(ctx, instanceID, inst.OLAPConnector)
+	// The AI connector is optional
+	if inst.AIConnector == "" {
+		return nil, nil, ErrAINotConfigured
+	}
+
+	conn, release, err := r.AcquireHandle(ctx, instanceID, inst.AIConnector)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	ai, ok := conn.AsAI(instanceID)
+	if !ok {
+		release()
+		return nil, nil, fmt.Errorf("connector %q is not a valid AI service", inst.AIConnector)
+	}
+
+	return ai, release, nil
+}
+
+// OLAP returns a handle for an OLAP data store.
+// The connector argument is optional. If not provided, the instance's default OLAP connector is used.
+func (r *Runtime) OLAP(ctx context.Context, instanceID, connector string) (drivers.OLAPStore, func(), error) {
+	inst, err := r.Instance(ctx, instanceID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if connector == "" {
+		connector = inst.ResolveOLAPConnector()
+	}
+
+	conn, release, err := r.AcquireHandle(ctx, instanceID, connector)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -98,7 +146,7 @@ func (r *Runtime) OLAP(ctx context.Context, instanceID string) (drivers.OLAPStor
 	olap, ok := conn.AsOLAP(instanceID)
 	if !ok {
 		release()
-		return nil, nil, fmt.Errorf("connector %q is not a valid OLAP data store", inst.OLAPConnector)
+		return nil, nil, fmt.Errorf("connector %q is not a valid OLAP data store", connector)
 	}
 
 	return olap, release, nil
@@ -111,7 +159,7 @@ func (r *Runtime) Catalog(ctx context.Context, instanceID string) (drivers.Catal
 	}
 
 	if inst.EmbedCatalog {
-		conn, release, err := r.AcquireHandle(ctx, instanceID, inst.OLAPConnector)
+		conn, release, err := r.AcquireHandle(ctx, instanceID, inst.ResolveOLAPConnector())
 		if err != nil {
 			return nil, nil, err
 		}
@@ -119,7 +167,7 @@ func (r *Runtime) Catalog(ctx context.Context, instanceID string) (drivers.Catal
 		store, ok := conn.AsCatalogStore(instanceID)
 		if !ok {
 			release()
-			return nil, nil, fmt.Errorf("can't embed catalog because it is not supported by the connector %q", inst.OLAPConnector)
+			return nil, nil, fmt.Errorf("can't embed catalog because it is not supported by the connector %q", inst.ResolveOLAPConnector())
 		}
 
 		return store, release, nil
@@ -147,106 +195,215 @@ func (r *Runtime) Catalog(ctx context.Context, instanceID string) (drivers.Catal
 	return store, release, nil
 }
 
-func (r *Runtime) connectorConfig(ctx context.Context, instanceID, name string) (string, map[string]any, error) {
+func (r *Runtime) ConnectorConfig(ctx context.Context, instanceID, name string) (*ConnectorConfig, error) {
 	inst, err := r.Instance(ctx, instanceID)
 	if err != nil {
-		return "", nil, err
+		return nil, err
 	}
 
+	res := &ConnectorConfig{}
+
 	// Search for connector definition in instance
-	var connector *runtimev1.Connector
 	for _, c := range inst.Connectors {
 		if c.Name == name {
-			connector = c
+			res.Driver = c.Type
+			res.Preset = maps.Clone(c.Config) // Cloning because Preset may be mutated later, but the inst object is shared.
+			if c.Provision {
+				res.Provision = c.Provision
+				res.ProvisionArgs = c.ProvisionArgs.AsMap()
+			}
 			break
 		}
 	}
 
-	// Search for connector definition in rill.yaml
-	if connector == nil {
-		for _, c := range inst.ProjectConnectors {
-			if c.Name == name {
-				connector = c
-				break
-			}
+	// Search for connector definitions from YAML files
+	for _, c := range inst.ProjectConnectors {
+		if c.Name != name {
+			continue
 		}
+
+		res.Driver = c.Type
+		res.Project, err = ResolveConnectorProperties(inst.Environment, inst.ResolveVariables(false), c)
+		if err != nil {
+			return nil, err
+		}
+		if c.Provision {
+			res.Provision = c.Provision
+			res.ProvisionArgs = c.ProvisionArgs.AsMap()
+		}
+
+		break
 	}
 
 	// Search for implicit connectors (where the name matches a driver name)
-	if connector == nil {
+	if res.Driver == "" {
 		_, ok := drivers.Drivers[name]
 		if ok {
-			connector = &runtimev1.Connector{
-				Type: name,
-				Name: name,
-			}
+			res.Driver = name
 		}
 	}
 
-	// Return if search for connector was unsuccessful
-	if connector == nil {
-		return "", nil, fmt.Errorf("unknown connector %q", name)
+	// Return if search for connector driver was unsuccessful
+	if res.Driver == "" {
+		return nil, fmt.Errorf("unknown connector %q", name)
 	}
 
-	// Build connector config
-	cfg := make(map[string]any)
-
-	// Apply config from definition
-	for key, value := range connector.Config {
-		cfg[strings.ToLower(key)] = value
-	}
-
-	// Instance variables matching the format "connector.name.var" are applied to the connector config
-	vars := inst.ResolveVariables()
+	// Build res.Env config based on instance variables matching the format "connector.name.var"
+	vars := inst.ResolveVariables(true)
 	prefix := fmt.Sprintf("connector.%s.", name)
 	for k, v := range vars {
 		if after, found := strings.CutPrefix(k, prefix); found {
-			cfg[strings.ToLower(after)] = v
+			if res.Env == nil {
+				res.Env = make(map[string]string)
+			}
+			res.Env[after] = v
 		}
 	}
 
 	// For backwards compatibility, certain root-level variables apply to certain implicit connectors.
 	// NOTE: This switches on connector.Name, not connector.Type, because this only applies to implicit connectors.
-	switch connector.Name {
-	case "s3", "athena":
-		setIfNil(cfg, "aws_access_key_id", vars["aws_access_key_id"])
-		setIfNil(cfg, "aws_secret_access_key", vars["aws_secret_access_key"])
-		setIfNil(cfg, "aws_session_token", vars["aws_session_token"])
+	switch name {
+	case "s3", "athena", "redshift":
+		res.setPreset("aws_access_key_id", vars["aws_access_key_id"], false)
+		res.setPreset("aws_secret_access_key", vars["aws_secret_access_key"], false)
+		res.setPreset("aws_session_token", vars["aws_session_token"], false)
 	case "azure":
-		setIfNil(cfg, "azure_storage_account", vars["azure_storage_account"])
-		setIfNil(cfg, "azure_storage_key", vars["azure_storage_key"])
-		setIfNil(cfg, "azure_storage_sas_token", vars["azure_storage_sas_token"])
-		setIfNil(cfg, "azure_storage_connection_string", vars["azure_storage_connection_string"])
+		res.setPreset("azure_storage_account", vars["azure_storage_account"], false)
+		res.setPreset("azure_storage_key", vars["azure_storage_key"], false)
+		res.setPreset("azure_storage_sas_token", vars["azure_storage_sas_token"], false)
+		res.setPreset("azure_storage_connection_string", vars["azure_storage_connection_string"], false)
 	case "gcs":
-		setIfNil(cfg, "google_application_credentials", vars["google_application_credentials"])
+		res.setPreset("google_application_credentials", vars["google_application_credentials"], false)
 	case "bigquery":
-		setIfNil(cfg, "google_application_credentials", vars["google_application_credentials"])
+		res.setPreset("google_application_credentials", vars["google_application_credentials"], false)
 	case "motherduck":
-		setIfNil(cfg, "token", vars["token"])
-		setIfNil(cfg, "dsn", "")
-	}
-
-	// Apply built-in connector config
-	cfg["allow_host_access"] = r.opts.AllowHostAccess
-
-	// The "local_file" connector needs to know the repo root.
-	// TODO: This is an ugly hack. But how can we get rid of it?
-	if connector.Name == "local_file" {
+		res.setPreset("token", vars["token"], false)
+		res.setPreset("dsn", "", true)
+	case "local_file":
+		// The "local_file" connector needs to know the repo root.
+		// TODO: This is an ugly hack. But how can we get rid of it?
 		if inst.RepoConnector != "local_file" { // The RepoConnector shouldn't be named "local_file", but let's still try to avoid infinite recursion
 			repo, release, err := r.Repo(ctx, instanceID)
 			if err != nil {
-				return "", nil, err
+				return nil, err
 			}
-			cfg["dsn"] = repo.Root()
+			rootPath, err := repo.Root(ctx)
+			if err != nil {
+				release()
+				return nil, fmt.Errorf("failed to get root path: %w", err)
+			}
+			res.setPreset("dsn", rootPath, true)
 			release()
 		}
 	}
 
-	return connector.Type, cfg, nil
+	// Apply built-in system-wide config
+	res.setPreset("allow_host_access", strconv.FormatBool(r.opts.AllowHostAccess), true)
+
+	// Done
+	return res, nil
 }
 
-func setIfNil(m map[string]any, key string, value any) {
-	if _, ok := m[key]; !ok {
-		m[key] = value
+// ResolveConnectorProperties resolves templating in the provided connector's properties.
+// It always returns a clone of the properties, even if no templating is found, so the output is safe for further mutations.
+func ResolveConnectorProperties(environment string, vars map[string]string, c *runtimev1.Connector) (map[string]string, error) {
+	res := maps.Clone(c.Config)
+	if res == nil {
+		res = make(map[string]string)
 	}
+
+	// DEPRECATED: ConfigFromVariables is deprecated, keeping this for short-term backwards compatibility.
+	for k, v := range c.ConfigFromVariables {
+		val, ok := vars[v]
+		if ok {
+			res[k] = val
+		}
+	}
+
+	// Resolve templating in properties that use it
+	for _, k := range c.TemplatedProperties {
+		v, ok := res[k]
+		if !ok {
+			continue
+		}
+		v, err := rillv1.ResolveTemplate(v, rillv1.TemplateData{
+			Environment: environment,
+			Variables:   vars,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve templated property %q: %w", k, err)
+		}
+		res[k] = v
+	}
+
+	return res, nil
+}
+
+// ConnectorConfig holds and resolves connector configuration.
+// We support three levels of configuration:
+// 1. Preset: provided when creating the instance (or set by the system, such as allow_host_access). Cannot be overridden.
+// 2. Project: defined in the rill.yaml file. Can be overridden by the env.
+// 3. Env: defined in the instance's variables (in the format "connector.name.var").
+type ConnectorConfig struct {
+	Driver  string
+	Preset  map[string]string
+	Project map[string]string
+	Env     map[string]string
+	// Provision will cause it to request the admin service to provision the connector.
+	Provision bool
+	// ProvisionArgs provide provisioning args for when ProvisionName is set.
+	ProvisionArgs map[string]any
+}
+
+// Resolve returns the final resolved connector configuration.
+// It guarantees that all keys in the result are lowercase.
+func (c *ConnectorConfig) Resolve() map[string]any {
+	n := len(c.Preset) + len(c.Project) + len(c.Env)
+	if n == 0 {
+		return nil
+	}
+
+	cfg := make(map[string]any, n)
+	for k, v := range c.Project {
+		cfg[strings.ToLower(k)] = v
+	}
+	for k, v := range c.Env {
+		cfg[strings.ToLower(k)] = v
+	}
+	for k, v := range c.Preset {
+		cfg[strings.ToLower(k)] = v
+	}
+	return cfg
+}
+
+// ResolveString is similar to Resolve, but it returns a map of strings.
+func (c *ConnectorConfig) ResolveStrings() map[string]string {
+	n := len(c.Preset) + len(c.Project) + len(c.Env)
+	if n == 0 {
+		return nil
+	}
+
+	cfg := make(map[string]string, n)
+	for k, v := range c.Project {
+		cfg[strings.ToLower(k)] = v
+	}
+	for k, v := range c.Env {
+		cfg[strings.ToLower(k)] = v
+	}
+	for k, v := range c.Preset {
+		cfg[strings.ToLower(k)] = v
+	}
+	return cfg
+}
+
+// setPreset sets a preset value.
+// If the provided value is empty, it will not be added unless force is true.
+func (c *ConnectorConfig) setPreset(k, v string, force bool) {
+	if v == "" && !force {
+		return
+	}
+	if c.Preset == nil {
+		c.Preset = make(map[string]string)
+	}
+	c.Preset[k] = v
 }

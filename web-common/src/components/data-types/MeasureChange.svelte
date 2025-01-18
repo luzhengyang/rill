@@ -1,4 +1,4 @@
-<script>
+<script lang="ts">
   import Base from "./Base.svelte";
   import { isPercDiff } from "./type-utils";
   export let inTable = false;
@@ -14,7 +14,7 @@
 
 <Base
   {isNull}
-  classes="ui-copy-number font-normal {customStyle} {inTable &&
+  classes="ui-copy-number w-full font-normal {customStyle} {inTable &&
     'block text-right'}"
   {dark}
 >

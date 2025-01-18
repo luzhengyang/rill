@@ -1,41 +1,49 @@
 <script lang="ts">
-  import { Dialog } from "@rilldata/web-common/components/modal/index";
-  import { createEventDispatcher } from "svelte";
+  import { onDestroy } from "svelte";
   import {
     DuplicateActions,
     duplicateSourceAction,
     duplicateSourceName,
   } from "../sources-store";
+  import Button from "@rilldata/web-common/components/button/Button.svelte";
+  import * as Dialog from "@rilldata/web-common/components/dialog-v2";
 
-  const dispatch = createEventDispatcher();
-  function onCancel() {
+  export let onComplete: () => void;
+  export let onCancel: () => void;
+
+  function cancel() {
     $duplicateSourceName = null;
     $duplicateSourceAction = DuplicateActions.Cancel;
-    dispatch("cancel");
+    onCancel();
   }
-</script>
 
-<Dialog
-  showCancel
-  size="md"
-  on:cancel={onCancel}
-  on:click-outside={onCancel}
-  on:primary-action={() => {
+  function keepBoth() {
     $duplicateSourceName = null;
     $duplicateSourceAction = DuplicateActions.KeepBoth;
-  }}
-  on:secondary-action={() => {
+    onComplete();
+  }
+
+  function overwriteSource() {
     $duplicateSourceName = null;
     $duplicateSourceAction = DuplicateActions.Overwrite;
-  }}
->
-  <svelte:fragment slot="title">Duplicate source name</svelte:fragment>
-  <svelte:fragment slot="body">
-    A source with the name <b>{$duplicateSourceName}</b> already exists.
-  </svelte:fragment>
+    onComplete();
+  }
 
-  <svelte:fragment slot="secondary-action-body"
-    >Replace Existing Source</svelte:fragment
-  >
-  <svelte:fragment slot="primary-action-body">Keep Both</svelte:fragment>
-</Dialog>
+  onDestroy(() => {
+    $duplicateSourceName = null;
+  });
+</script>
+
+<Dialog.Description>
+  A source with the name <b>{$duplicateSourceName}</b> already exists.
+</Dialog.Description>
+
+<Dialog.Footer>
+  <Button type="text" on:click={cancel}>Cancel</Button>
+
+  <Button type="text" on:click={overwriteSource}>
+    Replace Existing Source
+  </Button>
+
+  <Button type="primary" on:click={keepBoth}>Keep Both</Button>
+</Dialog.Footer>

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { createAdminServiceTriggerReport } from "@rilldata/web-admin/client";
   import { Button } from "@rilldata/web-common/components/button";
-  import { notifications } from "@rilldata/web-common/components/notifications";
+  import { eventBus } from "@rilldata/web-common/lib/event-bus/event-bus";
   import Tooltip from "@rilldata/web-common/components/tooltip/Tooltip.svelte";
   import TooltipContent from "@rilldata/web-common/components/tooltip/TooltipContent.svelte";
   import { ResourceKind } from "@rilldata/web-common/features/entity-management/resource-selectors";
@@ -14,9 +14,11 @@
   export let project: string;
   export let report: string;
 
+  $: ({ instanceId } = $runtime);
+
   const queryClient = useQueryClient();
   const triggerReport = createAdminServiceTriggerReport();
-  const reportQuery = useReport($runtime.instanceId, report);
+  const reportQuery = useReport(instanceId, report);
 
   async function handleRunNow() {
     const lastExecution =
@@ -28,7 +30,7 @@
       data: undefined,
     });
 
-    notifications.send({
+    eventBus.emit("notification", {
       message: "Triggered an ad-hoc run of this report.",
       type: "success",
     });
@@ -38,11 +40,11 @@
       $reportQuery.data.resource.report.state.executionHistory[0] ===
       lastExecution
     ) {
-      queryClient.invalidateQueries(
-        getRuntimeServiceGetResourceQueryKey($runtime.instanceId, {
+      await queryClient.invalidateQueries(
+        getRuntimeServiceGetResourceQueryKey(instanceId, {
           "name.name": report,
           "name.kind": ResourceKind.Report,
-        })
+        }),
       );
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }

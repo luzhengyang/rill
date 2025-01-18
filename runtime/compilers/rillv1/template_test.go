@@ -88,13 +88,26 @@ func TestAnalyze(t *testing.T) {
 }
 
 func TestResolve(t *testing.T) {
-	template := "SELECT partner_id FROM domain_partner_mapping WHERE domain = '{{ .user.domain }}' and groups IN ('{{ .user.groups | join \"', '\" }}')"
+	template := "SELECT partner_id FROM domain_partner_mapping WHERE domain = '{{ .user.domain }}' AND groups IN ('{{ .user.groups | join \"', '\" }}') {{ if dev }}OR true{{ end }}"
 	resolved, err := ResolveTemplate(template, TemplateData{
+		Environment: "dev",
 		User: map[string]any{
 			"domain": "rilldata.com",
 			"groups": []string{"admin", "user"},
 		},
 	})
 	require.NoError(t, err)
-	require.Equal(t, "SELECT partner_id FROM domain_partner_mapping WHERE domain = 'rilldata.com' and groups IN ('admin', 'user')", resolved)
+	require.Equal(t, "SELECT partner_id FROM domain_partner_mapping WHERE domain = 'rilldata.com' AND groups IN ('admin', 'user') OR true", resolved)
+}
+
+func TestVariables(t *testing.T) {
+	template := `a={{ .env.a }} b.a={{ .env.b.a }} b.a={{ get .env "b.a" }}`
+	resolved, err := ResolveTemplate(template, TemplateData{
+		Variables: map[string]string{
+			"a":   "1",
+			"b.a": "2",
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "a=1 b.a=2 b.a=2", resolved)
 }

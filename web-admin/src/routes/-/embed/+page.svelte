@@ -1,50 +1,77 @@
 <script lang="ts">
   import { page } from "$app/stores";
-  import { Dashboard } from "@rilldata/web-common/features/dashboards";
-  import DashboardURLStateProvider from "@rilldata/web-common/features/dashboards/proto-state/DashboardURLStateProvider.svelte";
-  import { useDashboard } from "@rilldata/web-common/features/dashboards/selectors";
-  import StateManagersProvider from "@rilldata/web-common/features/dashboards/state-managers/StateManagersProvider.svelte";
-  import DashboardStateProvider from "@rilldata/web-common/features/dashboards/stores/DashboardStateProvider.svelte";
-  import { errorStore } from "../../../features/errors/error-store";
+  import ContentContainer from "@rilldata/web-admin/components/layout/ContentContainer.svelte";
+  import DashboardsTable from "@rilldata/web-admin/features/dashboards/listing/DashboardsTable.svelte";
+  import CanvasEmbed from "@rilldata/web-admin/features/embeds/CanvasEmbed.svelte";
+  import ExploreEmbed from "@rilldata/web-admin/features/embeds/ExploreEmbed.svelte";
+  import TopNavigationBarEmbed from "@rilldata/web-admin/features/embeds/TopNavigationBarEmbed.svelte";
+  import UnsupportedKind from "@rilldata/web-admin/features/embeds/UnsupportedKind.svelte";
+  import { ResourceKind } from "@rilldata/web-common/features/entity-management/resource-selectors";
+  import { featureFlags } from "@rilldata/web-common/features/feature-flags";
+  import type { V1ResourceName } from "@rilldata/web-common/runtime-client";
+
+  // Embedded dashboards communicate directly with the project runtime and do not communicate with the admin server.
+  // One by-product of this is that they have no access to control plane features like alerts, bookmarks, and scheduled reports.
+  featureFlags.set(false, "adminServer");
 
   const instanceId = $page.url.searchParams.get("instance_id");
-  const dashboardName = $page.url.searchParams.get("resource");
-  // ignoring state and theme params for now
+  const initialResourceName = $page.url.searchParams.get("resource");
+  const initialResourceType =
+    $page.url.searchParams.get("type") ?? $page.url.searchParams.get("kind"); // "kind" is for backwards compatibility
+  const navigation = $page.url.searchParams.get("navigation");
+  // Ignoring state and theme params for now
+  // const state = $page.url.searchParams.get("state");
+  // const theme = $page.url.searchParams.get("theme");
 
-  $: dashboard = useDashboard(instanceId, dashboardName);
-  $: isDashboardNotFound =
-    $dashboard.isError && $dashboard.error?.response?.status === 404;
-  // We check for metricsView.state.validSpec instead of meta.reconcileError. validSpec persists
-  // from previous valid dashboards, allowing display even when the current dashboard spec is invalid
-  // and a meta.reconcileError exists.
-  $: isDashboardErrored = !$dashboard.data?.metricsView?.state?.validSpec;
+  // Manage active resource
+  let activeResource: V1ResourceName | null = null;
+  if (initialResourceName && initialResourceType) {
+    activeResource = {
+      name: initialResourceName,
+      kind: initialResourceType,
+    };
+  }
 
-  // If no dashboard is found, show a 404 page
-  $: if (isDashboardNotFound) {
-    errorStore.set({
-      statusCode: 404,
-      header: "Dashboard not found",
-      body: `The dashboard you requested could not be found. Please check that you provided the name of a working dashboard.`,
-    });
+  function handleSelectResource(event: CustomEvent<V1ResourceName>) {
+    activeResource = event.detail;
+  }
+
+  function handleGoHome() {
+    activeResource = null;
   }
 </script>
 
 <svelte:head>
-  <title>{dashboardName} - Rill</title>
+  {#if activeResource}
+    <title>{activeResource.name} - Rill</title>
+  {:else}
+    <title>Rill</title>
+  {/if}
 </svelte:head>
 
-{#if $dashboard.isSuccess}
-  {#if isDashboardErrored}
-    <br /> Dashboard Error <br />
+{#if navigation}
+  <TopNavigationBarEmbed
+    {instanceId}
+    {activeResource}
+    on:select-resource={handleSelectResource}
+    on:go-home={handleGoHome}
+  />
+
+  {#if !activeResource}
+    <ContentContainer>
+      <div class="flex flex-col items-center gap-y-4">
+        <DashboardsTable isEmbedded on:select-resource={handleSelectResource} />
+      </div>
+    </ContentContainer>
+  {/if}
+{/if}
+
+{#if activeResource}
+  {#if activeResource?.kind === ResourceKind.Explore.toString()}
+    <ExploreEmbed {instanceId} exploreName={activeResource.name} />
+  {:else if activeResource?.kind === ResourceKind.Canvas.toString()}
+    <CanvasEmbed {instanceId} canvasName={activeResource.name} />
   {:else}
-    <StateManagersProvider metricsViewName={dashboardName}>
-      {#key dashboardName}
-        <DashboardStateProvider metricViewName={dashboardName}>
-          <DashboardURLStateProvider metricViewName={dashboardName}>
-            <Dashboard metricViewName={dashboardName} leftMargin={"48px"} />
-          </DashboardURLStateProvider>
-        </DashboardStateProvider>
-      {/key}
-    </StateManagersProvider>
+    <UnsupportedKind />
   {/if}
 {/if}

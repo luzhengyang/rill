@@ -1,0 +1,124 @@
+syntax = "proto3";
+package rill.local.v1;
+
+import "google/protobuf/timestamp.proto";
+import "rill/admin/v1/api.proto";
+
+service LocalService {
+  // Ping returns the current time.
+  rpc Ping(PingRequest) returns (PingResponse) {}
+
+  // GetMetadata returns information about the local Rill instance.
+  rpc GetMetadata(GetMetadataRequest) returns (GetMetadataResponse) {}
+
+  // GetVersion returns details about the current and latest available Rill versions.
+  rpc GetVersion(GetVersionRequest) returns (GetVersionResponse) {}
+
+  // PushToGithub create a Git repo from local project and pushed to users git account.
+  rpc PushToGithub(PushToGithubRequest) returns (PushToGithubResponse) {}
+
+  // DeployProject deploys the local project to the Rill cloud.
+  rpc DeployProject(DeployProjectRequest) returns (DeployProjectResponse) {}
+
+  // RedeployProject updates a deployed project.
+  rpc RedeployProject(RedeployProjectRequest) returns (RedeployProjectResponse) {}
+
+  // GetCurrentUser returns the locally logged in user
+  rpc GetCurrentUser(GetCurrentUserRequest) returns (GetCurrentUserResponse) {}
+
+  // GetCurrentProject returns the rill cloud project connected to the local project
+  rpc GetCurrentProject(GetCurrentProjectRequest) returns (GetCurrentProjectResponse) {}
+
+  // ListOrganizationsAndBillingMetadata returns metadata about the current user's orgs.
+  rpc ListOrganizationsAndBillingMetadata(ListOrganizationsAndBillingMetadataRequest) returns (ListOrganizationsAndBillingMetadataResponse) {}
+}
+
+message PingRequest {}
+
+message PingResponse {
+  google.protobuf.Timestamp time = 1;
+}
+
+message GetMetadataRequest {}
+
+message GetMetadataResponse {
+  string instance_id = 1;
+  string project_path = 2;
+  string install_id = 3;
+  string user_id = 4;
+  string version = 5;
+  string build_commit = 6;
+  string build_time = 7;
+  bool is_dev = 8;
+  bool analytics_enabled = 9;
+  bool readonly = 10;
+  int32 grpc_port = 11;
+  string login_url = 12;
+  string admin_url = 13;
+}
+
+message GetVersionRequest {}
+
+message GetVersionResponse {
+  string current = 1;
+  string latest = 2;
+}
+
+message PushToGithubRequest {
+  string account = 1;
+  string repo = 2;
+}
+
+message PushToGithubResponse {
+  string github_url = 1;
+  string account = 2;
+  string repo = 3;
+}
+
+message DeployProjectRequest {
+  string org = 1;
+  string project_name = 2;
+  bool upload = 3;
+}
+
+message DeployProjectResponse {
+  string deploy_id = 1;
+  string org = 2;
+  string project = 3;
+  string frontend_url = 4;
+}
+
+message RedeployProjectRequest {
+  string project_id = 1;
+  bool reupload = 2;
+}
+
+message RedeployProjectResponse {
+  string frontend_url = 1;
+}
+
+message GetCurrentUserRequest {}
+
+message GetCurrentUserResponse {
+  admin.v1.User user = 1;
+  repeated string rill_user_orgs = 2;
+  bool is_representing_user = 3;
+}
+
+message GetCurrentProjectRequest {}
+
+message GetCurrentProjectResponse {
+  string local_project_name = 1;
+  admin.v1.Project project = 2;
+}
+
+message ListOrganizationsAndBillingMetadataRequest {}
+
+message ListOrganizationsAndBillingMetadataResponse {
+  message OrgMetadata {
+    string name = 1;
+    repeated admin.v1.BillingIssue issues = 3;
+  }
+
+  repeated OrgMetadata orgs = 1;
+}

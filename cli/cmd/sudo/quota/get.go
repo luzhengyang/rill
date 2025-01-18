@@ -16,13 +16,11 @@ func GetCmd(ch *cmdutil.Helper) *cobra.Command {
 		Short: "Get quota for user or org",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			cfg := ch.Config
 
-			client, err := cmdutil.Client(cfg)
+			client, err := ch.Client()
 			if err != nil {
 				return err
 			}
-			defer client.Close()
 
 			if org != "" {
 				res, err := client.GetOrganization(ctx, &adminv1.GetOrganizationRequest{
@@ -40,6 +38,7 @@ func GetCmd(ch *cmdutil.Helper) *cobra.Command {
 				fmt.Printf("Slots total: %d\n", orgQuotas.SlotsTotal)
 				fmt.Printf("Slots per deployment: %d\n", orgQuotas.SlotsPerDeployment)
 				fmt.Printf("Outstanding invites: %d\n", orgQuotas.OutstandingInvites)
+				fmt.Printf("Storage limit bytes per deployment: %d\n", orgQuotas.StorageLimitBytesPerDeployment)
 			} else if email != "" {
 				res, err := client.GetUser(ctx, &adminv1.GetUserRequest{
 					Email: email,
@@ -51,6 +50,7 @@ func GetCmd(ch *cmdutil.Helper) *cobra.Command {
 				userQuotas := res.User.Quotas
 				fmt.Printf("User: %s\n", email)
 				fmt.Printf("Projects: %d\n", userQuotas.SingleuserOrgs)
+				fmt.Printf("Trial Orgs: %d\n", userQuotas.TrialOrgs)
 			} else {
 				return fmt.Errorf("Please set --org or --user")
 			}

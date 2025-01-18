@@ -4,7 +4,7 @@ import type {
   PickActionFunctions,
 } from "@rilldata/web-common/metrics/service/ServiceBase";
 import { getActionMethods } from "@rilldata/web-common/metrics/service/ServiceBase";
-import type { V1RuntimeGetConfig } from "@rilldata/web-common/runtime-client/manual-clients";
+import { GetMetadataResponse } from "@rilldata/web-common/proto/gen/rill/local/v1/api_pb";
 import MD5 from "crypto-js/md5";
 import { v4 as uuidv4 } from "uuid";
 import type { BehaviourEventFactory } from "./BehaviourEventFactory";
@@ -33,6 +33,7 @@ export interface CloudMetricsFields {
   projectId: string;
   organizationId: string;
   userId: string;
+  version: string;
 }
 
 export class MetricsService
@@ -46,7 +47,7 @@ export class MetricsService
 
   public constructor(
     private readonly telemetryClient: TelemetryClient,
-    metricsEventFactories: Array<MetricsEventFactory>
+    metricsEventFactories: Array<MetricsEventFactory>,
   ) {
     metricsEventFactories.forEach((actions) => {
       getActionMethods(actions).forEach((action) => {
@@ -55,27 +56,29 @@ export class MetricsService
     });
   }
 
-  public loadLocalFields(localConfig: V1RuntimeGetConfig) {
-    const projectPathParts = localConfig.project_path.split("/");
+  public loadLocalFields(localConfig: GetMetadataResponse) {
+    const projectPathParts = localConfig.projectPath.split("/");
     this.commonFields = {
+      service_name: "web-local",
       app_name: "rill-developer",
-      install_id: localConfig.install_id,
+      install_id: localConfig.installId,
       client_id: this.getOrSetClientID(),
-      build_id: localConfig.build_commit,
+      build_id: localConfig.buildCommit,
       version: localConfig.version,
-      is_dev: localConfig.is_dev,
+      is_dev: localConfig.isDev,
       project_id: MD5(projectPathParts[projectPathParts.length - 1]).toString(),
-      user_id: localConfig.user_id,
-      analytics_enabled: localConfig.analytics_enabled,
+      user_id: localConfig.userId,
+      analytics_enabled: localConfig.analyticsEnabled,
       mode: localConfig.readonly ? "read-only" : "edit",
     };
   }
 
   public loadCloudFields(fields: CloudMetricsFields) {
     this.commonFields = {
-      // TODO: build_id and version
+      service_name: "web-admin",
       app_name: "rill-cloud",
       client_id: this.getOrSetClientID(),
+      version: fields.version,
       is_dev: fields.isDev,
       project_id: fields.projectId,
       organization_id: fields.organizationId,
@@ -86,7 +89,7 @@ export class MetricsService
 
   public async dispatch<Action extends keyof MetricsActionDefinition>(
     action: Action,
-    args: MetricsActionDefinition[Action]
+    args: MetricsActionDefinition[Action],
   ): Promise<void> {
     if (!this.commonFields?.analytics_enabled) return;
     const actionsInstance = this.actionsMap[action];
@@ -97,7 +100,7 @@ export class MetricsService
     const event: MetricsEvent = await actionsInstance[action].call(
       actionsInstance,
       { ...this.commonFields },
-      ...args
+      ...args,
     );
     await this.telemetryClient.fireEvent(event);
   }
@@ -106,7 +109,7 @@ export class MetricsService
     let clientId = localStorage.getItem(ClientIDStorageKey);
     if (clientId) return clientId;
 
-    clientId = uuidv4() as string;
+    clientId = uuidv4();
     localStorage.setItem(ClientIDStorageKey, clientId);
     return clientId;
   }

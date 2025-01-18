@@ -3,6 +3,7 @@
   import StackingWord from "@rilldata/web-common/components/tooltip/StackingWord.svelte";
   import TooltipShortcutContainer from "@rilldata/web-common/components/tooltip/TooltipShortcutContainer.svelte";
   import TooltipTitle from "@rilldata/web-common/components/tooltip/TooltipTitle.svelte";
+  import { isClipboardApiSupported } from "../../../lib/actions/copy-to-clipboard";
 
   export let modelName;
 </script>
@@ -16,15 +17,17 @@
 <TooltipShortcutContainer>
   <div>Open in workspace</div>
   <Shortcut>Click</Shortcut>
-  <div>
-    <StackingWord key="shift">Copy</StackingWord> name to clipboard
-  </div>
-  <Shortcut>
-    <span
-      style="
+  {#if isClipboardApiSupported()}
+    <div>
+      <StackingWord key="shift">Copy</StackingWord> name to clipboard
+    </div>
+    <Shortcut>
+      <span
+        style="
   font-family: var(--system); 
   font-size: 11.5px;
 ">⇧</span
-    > + Click</Shortcut
-  >
+      > + Click</Shortcut
+    >
+  {/if}
 </TooltipShortcutContainer>

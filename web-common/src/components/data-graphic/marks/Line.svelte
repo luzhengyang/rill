@@ -6,10 +6,10 @@
   import { guidGenerator } from "@rilldata/web-common/lib/guid";
   import { extent } from "d3-array";
   import { getContext, onDestroy } from "svelte";
+  import type { Readable } from "svelte/store";
   import { contexts } from "../constants";
   import type { ExtremumResolutionStore, ScaleStore } from "../state/types";
-  import { PlotConfig, lineFactory } from "../utils";
-  import type { Readable } from "svelte/store";
+  import { type PlotConfig, lineFactory } from "../utils";
 
   const markID = guidGenerator();
 
@@ -72,11 +72,11 @@
       }
       const max = Math.max(
         $yScale(data[i + 1][yAccessor]),
-        $yScale(data[i][yAccessor])
+        $yScale(data[i][yAccessor]),
       );
       const min = Math.min(
         $yScale(data[i + 1][yAccessor]),
-        $yScale(data[i][yAccessor])
+        $yScale(data[i][yAccessor]),
       );
       return Math.abs(max - min);
     })
@@ -102,14 +102,14 @@
     Math.max(
       2 /
         (totalTravelDistance /
-          (($xScale.range()[1] - $xScale.range()[0]) *
+          ((Number($xScale.range()[1]) - Number($xScale.range()[0])) *
             ($config.devicePixelRatio || 3))),
-      (($xScale.range()[1] - $xScale.range()[0]) *
+      ((Number($xScale.range()[1]) - Number($xScale.range()[0])) *
         ($config.devicePixelRatio || 3) *
         0.7) /
         data.length /
-        1.5
-    )
+        1.5,
+    ),
   );
 </script>
 

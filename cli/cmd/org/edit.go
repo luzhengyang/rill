@@ -11,8 +11,7 @@ import (
 )
 
 func EditCmd(ch *cmdutil.Helper) *cobra.Command {
-	var orgName, description string
-	cfg := ch.Config
+	var orgName, displayName, description, billingEmail string
 
 	editCmd := &cobra.Command{
 		Use:   "edit [<org-name>]",
@@ -21,22 +20,24 @@ func EditCmd(ch *cmdutil.Helper) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 
-			client, err := cmdutil.Client(cfg)
+			client, err := ch.Client()
 			if err != nil {
 				return err
 			}
-			defer client.Close()
 
 			if len(args) > 0 {
 				orgName = args[0]
 			}
-			if !cmd.Flags().Changed("org") && len(args) == 0 && cfg.Interactive {
-				orgNames, err := cmdutil.OrgNames(ctx, client)
+			if !cmd.Flags().Changed("org") && len(args) == 0 && ch.Interactive {
+				orgNames, err := OrgNames(ctx, ch)
 				if err != nil {
 					return err
 				}
 
-				orgName = cmdutil.SelectPrompt("Select org to edit", orgNames, cfg.Org)
+				orgName, err = cmdutil.SelectPrompt("Select org to edit", orgNames, ch.Org)
+				if err != nil {
+					return err
+				}
 			}
 
 			resp, err := client.GetOrganization(ctx, &adminv1.GetOrganizationRequest{Name: orgName})
@@ -56,18 +57,52 @@ func EditCmd(ch *cmdutil.Helper) *cobra.Command {
 				Name: org.Name,
 			}
 
-			promptFlagValues := cfg.Interactive
-			if cmd.Flags().Changed("description") {
-				promptFlagValues = false
-				req.Description = &description
-			}
-
-			if promptFlagValues {
-				description, err = cmdutil.InputPrompt("Enter the description", org.Description)
+			if cmd.Flags().Changed("display-name") {
+				req.DisplayName = &displayName
+			} else if ch.Interactive {
+				ok, err := cmdutil.ConfirmPrompt("Do you want to update the display name", "", false)
 				if err != nil {
 					return err
 				}
+				if ok {
+					displayName, err = cmdutil.InputPrompt("Enter the display name", org.DisplayName)
+					if err != nil {
+						return err
+					}
+					req.DisplayName = &displayName
+				}
+			}
+
+			if cmd.Flags().Changed("description") {
 				req.Description = &description
+			} else if ch.Interactive {
+				ok, err := cmdutil.ConfirmPrompt("Do you want to update the description", "", false)
+				if err != nil {
+					return err
+				}
+				if ok {
+					description, err = cmdutil.InputPrompt("Enter the description", org.Description)
+					if err != nil {
+						return err
+					}
+					req.Description = &description
+				}
+			}
+
+			if cmd.Flags().Changed("billing-email") {
+				req.BillingEmail = &billingEmail
+			} else if ch.Interactive {
+				ok, err := cmdutil.ConfirmPrompt("Do you want to update the billing email", "", false)
+				if err != nil {
+					return err
+				}
+				if ok {
+					billingEmail, err = cmdutil.InputPrompt("Enter the billing email", org.BillingEmail)
+					if err != nil {
+						return err
+					}
+					req.BillingEmail = &billingEmail
+				}
 			}
 
 			updatedOrg, err := client.UpdateOrganization(ctx, req)
@@ -75,13 +110,17 @@ func EditCmd(ch *cmdutil.Helper) *cobra.Command {
 				return err
 			}
 
-			ch.Printer.PrintlnSuccess("Updated organization")
-			return ch.Printer.PrintResource([]*organization{toRow(updatedOrg.Organization)})
+			ch.PrintfSuccess("Updated organization\n")
+			ch.PrintOrgs([]*adminv1.Organization{updatedOrg.Organization}, "")
+
+			return nil
 		},
 	}
 	editCmd.Flags().SortFlags = false
-	editCmd.Flags().StringVar(&orgName, "org", cfg.Org, "Organization name")
+	editCmd.Flags().StringVar(&orgName, "org", ch.Org, "Organization name")
+	editCmd.Flags().StringVar(&displayName, "display-name", "", "Display name")
 	editCmd.Flags().StringVar(&description, "description", "", "Description")
+	editCmd.Flags().StringVar(&billingEmail, "billing-email", "", "Billing email")
 
 	return editCmd
 }

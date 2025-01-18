@@ -1,27 +1,57 @@
 <script lang="ts">
-  import IconSpaceFixer from "@rilldata/web-common/components/button/IconSpaceFixer.svelte";
-  import CaretDownIcon from "@rilldata/web-common/components/icons/CaretDownIcon.svelte";
-  import WithSelectMenu from "@rilldata/web-common/components/menu/wrappers/WithSelectMenu.svelte";
+  import * as DropdownMenu from "@rilldata/web-common/components/dropdown-menu";
   import { getStateManagers } from "@rilldata/web-common/features/dashboards/state-managers/state-managers";
   import { useTimeControlStore } from "@rilldata/web-common/features/dashboards/time-controls/time-control-store";
   import { TIME_GRAIN } from "@rilldata/web-common/lib/time/config";
   import { isGrainBigger } from "@rilldata/web-common/lib/time/grains";
-  import type { TimeGrain } from "@rilldata/web-common/lib/time/types";
-  import { createEventDispatcher } from "svelte";
+  import type {
+    AvailableTimeGrain,
+    DashboardTimeControls,
+    TimeGrain,
+  } from "@rilldata/web-common/lib/time/types";
   import type { V1TimeGrain } from "../../../runtime-client";
+  import { metricsExplorerStore } from "../stores/dashboard-stores";
+  import { getAllowedTimeGrains } from "@rilldata/web-common/lib/time/grains";
+  import Chip from "@rilldata/web-common/components/chip/core/Chip.svelte";
+  import type { TimeRange } from "@rilldata/web-common/lib/time/types";
 
-  export let timeGrainOptions: TimeGrain[];
-  export let minTimeGrain: V1TimeGrain;
+  export let exploreName: string;
+  export let tdd = false;
 
-  const dispatch = createEventDispatcher();
+  const ctx = getStateManagers();
+  const { dashboardStore, validSpecStore } = ctx;
+  const timeControlsStore = useTimeControlStore(ctx);
 
-  const timeControlsStore = useTimeControlStore(getStateManagers());
+  let timeGrainOptions: TimeGrain[];
+  let open = false;
+
+  $: ({ minTimeGrain, timeStart, timeEnd, selectedTimeRange } =
+    $timeControlsStore);
+
+  $: timeGrainOptions =
+    timeStart && timeEnd
+      ? getAllowedTimeGrains(new Date(timeStart), new Date(timeEnd))
+      : [];
+
+  $: baseTimeRange = selectedTimeRange?.start &&
+    selectedTimeRange?.end && {
+      name: selectedTimeRange?.name,
+      start: selectedTimeRange.start,
+      end: selectedTimeRange.end,
+    };
 
   $: activeTimeGrain = $timeControlsStore.selectedTimeRange?.interval;
   $: activeTimeGrainLabel =
-    activeTimeGrain && TIME_GRAIN[activeTimeGrain]?.label;
+    activeTimeGrain && TIME_GRAIN[activeTimeGrain as AvailableTimeGrain]?.label;
 
-  $: timeGrains = timeGrainOptions
+  $: capitalizedLabel = activeTimeGrainLabel
+    ?.split(" ")
+    .map((word) => {
+      return word.charAt(0).toUpperCase() + word.slice(1);
+    })
+    .join(" ");
+
+  $: timeGrains = minTimeGrain
     ? timeGrainOptions
         .filter((timeGrain) => !isGrainBigger(minTimeGrain, timeGrain.grain))
         .map((timeGrain) => {
@@ -30,41 +60,68 @@
             key: timeGrain.grain,
           };
         })
-    : undefined;
+    : [];
 
-  const onTimeGrainSelect = (timeGrain: V1TimeGrain) => {
-    dispatch("select-time-grain", { timeGrain });
-  };
+  function onTimeGrainSelect(timeGrain: V1TimeGrain) {
+    if (baseTimeRange) {
+      makeTimeSeriesTimeRangeAndUpdateAppState(
+        baseTimeRange,
+        timeGrain,
+        $dashboardStore?.selectedComparisonTimeRange,
+      );
+    }
+  }
+
+  function makeTimeSeriesTimeRangeAndUpdateAppState(
+    timeRange: TimeRange,
+    timeGrain: V1TimeGrain,
+    /** we should only reset the comparison range when the user has explicitly chosen a new
+     * time range. Otherwise, the current comparison state should continue to be the
+     * source of truth.
+     */
+    comparisonTimeRange: DashboardTimeControls | undefined,
+  ) {
+    metricsExplorerStore.selectTimeRange(
+      exploreName,
+      timeRange,
+      timeGrain,
+      comparisonTimeRange,
+      $validSpecStore.data?.metricsView ?? {},
+    );
+  }
 </script>
 
-{#if activeTimeGrain && timeGrainOptions}
-  <WithSelectMenu
-    paddingTop={1}
-    paddingBottom={1}
-    minWidth="160px"
-    distance={8}
-    options={timeGrains}
-    selection={{
-      main: activeTimeGrainLabel,
-      key: activeTimeGrain,
-    }}
-    on:select={(event) => onTimeGrainSelect(event.detail.key)}
-    let:toggleMenu
-    let:active
-  >
-    <button
-      class:bg-gray-200={active}
-      class="px-3 py-2 rounded flex flex-row gap-x-2 items-center hover:bg-gray-200 hover:dark:bg-gray-600"
-      on:click={toggleMenu}
-    >
-      <div>
-        Metric trends by <span class="font-bold">{activeTimeGrainLabel}</span>
-      </div>
-      <IconSpaceFixer pullRight>
-        <div class="transition-transform" class:-rotate-180={active}>
-          <CaretDownIcon size="14px" />
+{#if activeTimeGrain && timeGrainOptions.length && minTimeGrain}
+  <DropdownMenu.Root bind:open>
+    <DropdownMenu.Trigger asChild let:builder>
+      <Chip
+        type="time"
+        builders={[builder]}
+        active={open}
+        label="Select a time grain"
+      >
+        <div slot="body" class="flex gap-x-2 items-center">
+          <svelte:element this={tdd ? "b" : "span"}>
+            {tdd ? "Time" : "by"}
+          </svelte:element>
+
+          <svelte:element this={tdd ? "span" : "b"}>
+            {capitalizedLabel}
+          </svelte:element>
         </div>
-      </IconSpaceFixer>
-    </button>
-  </WithSelectMenu>
+      </Chip>
+    </DropdownMenu.Trigger>
+    <DropdownMenu.Content class="min-w-40" align="start">
+      {#each timeGrains as option (option.key)}
+        <DropdownMenu.CheckboxItem
+          role="menuitem"
+          checked={option.key === activeTimeGrain}
+          class="text-xs cursor-pointer"
+          on:click={() => onTimeGrainSelect(option.key)}
+        >
+          {option.main}
+        </DropdownMenu.CheckboxItem>
+      {/each}
+    </DropdownMenu.Content>
+  </DropdownMenu.Root>
 {/if}

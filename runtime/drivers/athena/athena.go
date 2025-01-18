@@ -2,11 +2,12 @@ package athena
 
 import (
 	"context"
-	"fmt"
+	"errors"
 
 	"github.com/mitchellh/mapstructure"
 	"github.com/rilldata/rill/runtime/drivers"
 	"github.com/rilldata/rill/runtime/pkg/activity"
+	"github.com/rilldata/rill/runtime/storage"
 	"go.uber.org/zap"
 )
 
@@ -16,10 +17,22 @@ func init() {
 }
 
 var spec = drivers.Spec{
-	DisplayName:        "Amazon Athena",
-	Description:        "Connect to Amazon Athena database.",
-	ServiceAccountDocs: "",
-	SourceProperties: []drivers.PropertySchema{
+	DisplayName: "Amazon Athena",
+	Description: "Connect to Amazon Athena database.",
+	DocsURL:     "",
+	ConfigProperties: []*drivers.PropertySpec{
+		{
+			Key:    "aws_access_key_id",
+			Type:   drivers.StringPropertyType,
+			Secret: true,
+		},
+		{
+			Key:    "aws_secret_access_key",
+			Type:   drivers.StringPropertyType,
+			Secret: true,
+		},
+	},
+	SourceProperties: []*drivers.PropertySpec{
 		{
 			Key:         "sql",
 			Type:        drivers.StringPropertyType,
@@ -30,49 +43,59 @@ var spec = drivers.Spec{
 		},
 		{
 			Key:         "output_location",
+			Type:        drivers.StringPropertyType,
 			DisplayName: "S3 output location",
 			Description: "Output location for query results in S3.",
 			Placeholder: "s3://bucket-name/path/",
-			Type:        drivers.StringPropertyType,
 			Required:    false,
 		},
 		{
 			Key:         "workgroup",
+			Type:        drivers.StringPropertyType,
 			DisplayName: "AWS Athena workgroup",
 			Description: "AWS Athena workgroup to use for queries.",
 			Placeholder: "primary",
-			Type:        drivers.StringPropertyType,
 			Required:    false,
 		},
 		{
 			Key:         "region",
+			Type:        drivers.StringPropertyType,
 			DisplayName: "AWS region",
 			Description: "AWS region to connect to Athena and the output location.",
 			Placeholder: "us-east-1",
-			Type:        drivers.StringPropertyType,
 			Required:    false,
 		},
-	},
-	ConfigProperties: []drivers.PropertySchema{
 		{
-			Key:    "aws_access_key_id",
-			Secret: true,
-		},
-		{
-			Key:    "aws_secret_access_key",
-			Secret: true,
+			Key:         "name",
+			Type:        drivers.StringPropertyType,
+			DisplayName: "Source name",
+			Description: "The name of the source",
+			Placeholder: "my_new_source",
+			Required:    true,
 		},
 	},
+	ImplementsWarehouse: true,
 }
 
 type driver struct{}
 
-func (d driver) Open(config map[string]any, shared bool, _ activity.Client, logger *zap.Logger) (drivers.Handle, error) {
-	if shared {
-		return nil, fmt.Errorf("athena driver can't be shared")
+type configProperties struct {
+	AccessKeyID     string `mapstructure:"aws_access_key_id"`
+	AllowHostAccess bool   `mapstructure:"allow_host_access"`
+	ExternalID      string `mapstructure:"external_id"`
+	RoleARN         string `mapstructure:"role_arn"`
+	RoleSessionName string `mapstructure:"role_session_name"`
+	SecretAccessKey string `mapstructure:"aws_secret_access_key"`
+	SessionToken    string `mapstructure:"aws_access_token"`
+}
+
+func (d driver) Open(instanceID string, config map[string]any, st *storage.Client, ac *activity.Client, logger *zap.Logger) (drivers.Handle, error) {
+	if instanceID == "" {
+		return nil, errors.New("athena driver can't be shared")
 	}
+
 	conf := &configProperties{}
-	err := mapstructure.Decode(config, conf)
+	err := mapstructure.WeakDecode(config, conf)
 	if err != nil {
 		return nil, err
 	}
@@ -82,10 +105,6 @@ func (d driver) Open(config map[string]any, shared bool, _ activity.Client, logg
 		logger: logger,
 	}
 	return conn, nil
-}
-
-func (d driver) Drop(config map[string]any, logger *zap.Logger) error {
-	return drivers.ErrDropNotSupported
 }
 
 func (d driver) Spec() drivers.Spec {
@@ -107,6 +126,11 @@ type Connection struct {
 
 var _ drivers.Handle = &Connection{}
 
+// Ping implements drivers.Handle.
+func (c *Connection) Ping(ctx context.Context) error {
+	return drivers.ErrNotImplemented
+}
+
 // Driver implements drivers.Connection.
 func (c *Connection) Driver() string {
 	return "athena"
@@ -115,7 +139,7 @@ func (c *Connection) Driver() string {
 // Config implements drivers.Connection.
 func (c *Connection) Config() map[string]any {
 	m := make(map[string]any, 0)
-	_ = mapstructure.Decode(c.config, m)
+	_ = mapstructure.Decode(c.config, &m)
 	return m
 }
 
@@ -144,6 +168,11 @@ func (c *Connection) AsAdmin(instanceID string) (drivers.AdminService, bool) {
 	return nil, false
 }
 
+// AsAI implements drivers.Handle.
+func (c *Connection) AsAI(instanceID string) (drivers.AIService, bool) {
+	return nil, false
+}
+
 // AsOLAP implements drivers.Connection.
 func (c *Connection) AsOLAP(instanceID string) (drivers.OLAPStore, bool) {
 	return nil, false
@@ -164,6 +193,16 @@ func (c *Connection) AsObjectStore() (drivers.ObjectStore, bool) {
 	return nil, false
 }
 
+// AsModelExecutor implements drivers.Handle.
+func (c *Connection) AsModelExecutor(instanceID string, opts *drivers.ModelExecutorOptions) (drivers.ModelExecutor, bool) {
+	return nil, false
+}
+
+// AsModelManager implements drivers.Handle.
+func (c *Connection) AsModelManager(instanceID string) (drivers.ModelManager, bool) {
+	return nil, false
+}
+
 // AsTransporter implements drivers.Connection.
 func (c *Connection) AsTransporter(from, to drivers.Handle) (drivers.Transporter, bool) {
 	return nil, false
@@ -173,14 +212,12 @@ func (c *Connection) AsFileStore() (drivers.FileStore, bool) {
 	return nil, false
 }
 
-// AsSQLStore implements drivers.Connection.
-func (c *Connection) AsSQLStore() (drivers.SQLStore, bool) {
+// AsWarehouse implements drivers.Handle.
+func (c *Connection) AsWarehouse() (drivers.Warehouse, bool) {
 	return c, true
 }
 
-type configProperties struct {
-	AccessKeyID     string `mapstructure:"aws_access_key_id"`
-	SecretAccessKey string `mapstructure:"aws_secret_access_key"`
-	SessionToken    string `mapstructure:"aws_access_token"`
-	AllowHostAccess bool   `mapstructure:"allow_host_access"`
+// AsNotifier implements drivers.Handle.
+func (c *Connection) AsNotifier(properties map[string]any) (drivers.Notifier, error) {
+	return nil, drivers.ErrNotNotifier
 }

@@ -101,7 +101,7 @@ func (c *connection) CreateResource(ctx context.Context, v int64, r drivers.Reso
 		return err
 	}
 	if exists {
-		return fmt.Errorf("catalog entry for kind=%q, name=%q already exists", r.Kind, r.Name)
+		return fmt.Errorf("catalog entry for type=%q, name=%q already exists", r.Kind, r.Name)
 	}
 
 	now := time.Now()
@@ -147,7 +147,7 @@ func (c *connection) UpdateResource(ctx context.Context, v int64, r drivers.Reso
 	}
 	if n, err := res.RowsAffected(); err == nil {
 		if n != 1 {
-			return fmt.Errorf("catalog entry for kind=%q, name=%q not found", r.Kind, r.Name)
+			return fmt.Errorf("catalog entry for type=%q, name=%q not found", r.Kind, r.Name)
 		}
 	}
 
@@ -187,4 +187,44 @@ func (c *connection) DeleteResources(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (c *connection) FindModelPartitions(ctx context.Context, opts *drivers.FindModelPartitionsOptions) ([]drivers.ModelPartition, error) {
+	return nil, drivers.ErrNotImplemented
+}
+
+func (c *connection) FindModelPartitionsByKeys(ctx context.Context, modelID string, keys []string) ([]drivers.ModelPartition, error) {
+	return nil, drivers.ErrNotImplemented
+}
+
+func (c *connection) CheckModelPartitionsHaveErrors(ctx context.Context, modelID string) (bool, error) {
+	return false, drivers.ErrNotImplemented
+}
+
+func (c *connection) InsertModelPartition(ctx context.Context, modelID string, partition drivers.ModelPartition) error {
+	return drivers.ErrNotImplemented
+}
+
+func (c *connection) UpdateModelPartition(ctx context.Context, modelID string, partition drivers.ModelPartition) error {
+	return drivers.ErrNotImplemented
+}
+
+func (c *connection) UpdateModelPartitionPending(ctx context.Context, modelID, partitionKey string) error {
+	return drivers.ErrNotImplemented
+}
+
+func (c *connection) UpdateModelPartitionsPendingIfError(ctx context.Context, modelID string) error {
+	return drivers.ErrNotImplemented
+}
+
+func (c *connection) DeleteModelPartitions(ctx context.Context, modelID string) error {
+	return drivers.ErrNotImplemented
+}
+
+func (c *connection) FindInstanceHealth(ctx context.Context, instanceID string) (*drivers.InstanceHealth, error) {
+	return nil, drivers.ErrNotImplemented
+}
+
+func (c *connection) UpsertInstanceHealth(ctx context.Context, h *drivers.InstanceHealth) error {
+	return drivers.ErrNotImplemented
 }
